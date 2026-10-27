@@ -9,15 +9,30 @@ from collections.abc import Mapping
 INDEX_SCHEMA_VERSION = 1
 
 
-def _strings(value: Any) -> tuple[str, ...]:
-    if value is None:
+def _required_string(value: Mapping[str, Any], field: str, path: str) -> str:
+    if field not in value:
+        raise ValueError(f"{path}.{field} is required")
+    item = value[field]
+    if not isinstance(item, str) or not item.strip():
+        raise ValueError(f"{path}.{field} must be a non-empty string")
+    return item
+
+
+def _string_array(value: Mapping[str, Any], field: str, path: str) -> tuple[str, ...]:
+    if field not in value:
         return ()
-    if isinstance(value, str):
-        return (value,) if value else ()
-    try:
-        return tuple(str(item) for item in value if item is not None and str(item))
-    except TypeError:
-        return ()
+    items = value[field]
+    if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+        raise ValueError(f"{path}.{field} must be an array of strings")
+    return tuple(items)
+
+
+def _profile_strings(value: Mapping[str, Any], path: str) -> dict[str, str]:
+    return {
+        "word": _required_string(value, "word", path),
+        "pos": _required_string(value, "pos", path),
+        "reading_id": _required_string(value, "reading_id", path),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,20 +67,24 @@ class ReadingProfile:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ReadingProfile:
+    def from_dict(cls, value: Mapping[str, Any], *, path: str = "profile") -> ReadingProfile:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{path} must be a JSON object")
+        fields = _profile_strings(value, path)
+        ipa = _string_array(value, "ipa", path)
+        if not ipa or any(not item.strip() for item in ipa):
+            raise ValueError(f"{path}.ipa must be a non-empty array of strings")
         return cls(
-            word=str(value["word"]),
-            pos=str(value["pos"]),
-            reading_id=str(value["reading_id"]),
-            ipa=_strings(value.get("ipa")),
-            sense_ids=_strings(value.get("sense_ids")),
-            etymology_numbers=_strings(value.get("etymology_numbers")),
-            glosses=_strings(value.get("glosses")),
-            topics=_strings(value.get("topics")),
-            tags=_strings(value.get("tags")),
-            examples=_strings(value.get("examples")),
-            synonyms=_strings(value.get("synonyms")),
-            antonyms=_strings(value.get("antonyms")),
+            **fields,
+            ipa=ipa,
+            sense_ids=_string_array(value, "sense_ids", path),
+            etymology_numbers=_string_array(value, "etymology_numbers", path),
+            glosses=_string_array(value, "glosses", path),
+            topics=_string_array(value, "topics", path),
+            tags=_string_array(value, "tags", path),
+            examples=_string_array(value, "examples", path),
+            synonyms=_string_array(value, "synonyms", path),
+            antonyms=_string_array(value, "antonyms", path),
         )
 
 
@@ -93,22 +112,35 @@ class AmbiguityIndex:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> AmbiguityIndex:
-        version = int(value.get("schema_version", 0))
+        if not isinstance(value, Mapping):
+            raise ValueError("ambiguity index root must be a JSON object")
+        version = value.get("schema_version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("schema_version must be an integer")
         if version != INDEX_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported ambiguity index schema {version}; "
                 f"supported schema is {INDEX_SCHEMA_VERSION}"
             )
-        raw_profiles = value.get("profiles", ())
+        language = _required_string(value, "language", "index")
+        if "locale" not in value:
+            raise ValueError("index.locale is required")
+        locale = value["locale"]
+        if locale is not None and not isinstance(locale, str):
+            raise ValueError("index.locale must be a string or null")
+        raw_profiles = value.get("profiles")
         if not isinstance(raw_profiles, list):
-            raise ValueError("'profiles' must be a JSON array")
-        profiles = tuple(
-            ReadingProfile.from_dict(item) for item in raw_profiles if isinstance(item, Mapping)
-        )
+            raise ValueError("index.profiles must be a JSON array")
+        profiles: list[ReadingProfile] = []
+        for position, item in enumerate(raw_profiles):
+            profile_path = f"profiles[{position}]"
+            if not isinstance(item, Mapping):
+                raise ValueError(f"{profile_path} must be a JSON object")
+            profiles.append(ReadingProfile.from_dict(item, path=profile_path))
         return cls(
-            language=str(value.get("language", "")),
-            locale=str(value["locale"]) if value.get("locale") is not None else None,
-            profiles=profiles,
+            language=language,
+            locale=locale,
+            profiles=tuple(profiles),
             schema_version=version,
         )
 
@@ -122,6 +154,7 @@ class DiscoveryReport:
     unlinked_ambiguity_keys: int
     non_ambiguous_keys: int
     entries_without_pronunciation: int
+    entries_without_pos: int = 0
     unlinked_keys: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -133,6 +166,7 @@ class DiscoveryReport:
             "unlinked_ambiguity_keys": self.unlinked_ambiguity_keys,
             "non_ambiguous_keys": self.non_ambiguous_keys,
             "entries_without_pronunciation": self.entries_without_pronunciation,
+            "entries_without_pos": self.entries_without_pos,
             "unlinked_keys": list(self.unlinked_keys),
         }
 

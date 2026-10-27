@@ -41,7 +41,7 @@ def _unique_text(values: Iterable[Any]) -> tuple[str, ...]:
         if text and text not in seen:
             seen.add(text)
             result.append(text)
-    return tuple(result)
+    return tuple(sorted(result))
 
 
 def _related_text(value: Any) -> str:
@@ -135,6 +135,7 @@ def discover_ambiguities(
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     entries_scanned = 0
     entries_without_pronunciation = 0
+    entries_without_pos = 0
 
     for entry in entries:
         entries_scanned += 1
@@ -142,7 +143,11 @@ def discover_ambiguities(
         if not raw_word:
             continue
         word = normalize_word(raw_word)
-        pos = normalize_pos(str(_field(entry, "pos", "") or "ENTRY"))
+        raw_pos = str(_field(entry, "pos", "") or "").strip()
+        if not raw_pos:
+            entries_without_pos += 1
+            continue
+        pos = normalize_pos(raw_pos)
         pronunciations = _pronunciations(entry)
         if not pronunciations:
             entries_without_pronunciation += 1
@@ -223,7 +228,14 @@ def discover_ambiguities(
                 )
             )
 
-    profiles.sort(key=lambda profile: (normalize_word(profile.word), profile.pos, profile.ipa))
+    profiles.sort(
+        key=lambda profile: (
+            normalize_word(profile.word),
+            profile.pos,
+            profile.ipa,
+            profile.reading_id,
+        )
+    )
     index = AmbiguityIndex(
         language=normalize_word(language),
         locale=locale,
@@ -237,6 +249,7 @@ def discover_ambiguities(
         unlinked_ambiguity_keys=unlinked_ambiguity_keys,
         non_ambiguous_keys=non_ambiguous_keys,
         entries_without_pronunciation=entries_without_pronunciation,
+        entries_without_pos=entries_without_pos,
         unlinked_keys=tuple(unlinked_keys),
     )
     return DiscoveryResult(index=index, report=report)

@@ -41,7 +41,7 @@ jobs:
             --cov-branch \
             --cov-report=term-missing \
             --cov-fail-under=70
-          python -m ruff check . --select E,F
+          python -m ruff check .
           python -m ruff format --check .
           python -m mypy pronresolve
       - name: Build and validate distributions

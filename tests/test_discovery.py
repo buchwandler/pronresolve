@@ -1,4 +1,4 @@
-from pronresolve import discover_ambiguities
+from pronresolve import discover_ambiguities, save_index
 
 
 def entry(word, pos, ipa, gloss, sense_id):
@@ -77,6 +77,32 @@ def test_reading_ids_do_not_depend_on_input_order():
     one = discover_ambiguities(rows, language="en").index
     two = discover_ambiguities(reversed(rows), language="en").index
     assert {p.reading_id for p in one.profiles} == {p.reading_id for p in two.profiles}
+
+
+def test_complete_index_is_deterministic_across_evidence_input_order(tmp_path):
+    rows = [
+        entry("wug", "noun", "wʌg", "zebra gloss", "sense-z"),
+        entry("wug", "noun", "wʌg", "alpha gloss", "sense-a"),
+        entry("wug", "noun", "wuːg", "bend", "sense-b"),
+    ]
+    one_index = discover_ambiguities(rows, language="en").index
+    two_index = discover_ambiguities(reversed(rows), language="en").index
+    assert one_index.to_dict() == two_index.to_dict()
+    one_path = save_index(one_index, tmp_path / "one.json")
+    two_path = save_index(two_index, tmp_path / "two.json")
+    assert one_path.read_bytes() == two_path.read_bytes()
+
+
+def test_missing_or_empty_pos_is_skipped_and_reported():
+    rows = [
+        entry("wug", "noun", "wʌg", "a bird", "sense-a"),
+        entry("wug", "noun", "wuːg", "a bend", "sense-b"),
+        entry("wug", "", "wɑg", "missing POS", "sense-c"),
+    ]
+    result = discover_ambiguities(rows, language="en")
+    assert len(result.index.profiles) == 2
+    assert result.report.entries_without_pos == 1
+    assert result.report.as_dict()["entries_without_pos"] == 1
 
 
 def test_report_counts_entries_without_pronunciation():

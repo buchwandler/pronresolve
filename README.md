@@ -1,60 +1,41 @@
-# pronresolve MVP
+# pronresolve
 
-`pronresolve` discovers same-spelling, same-part-of-speech pronunciation ambiguity from dictionary data and chooses a reading from sentence context when the evidence is strong enough.
-
-The package is data-driven. It contains **no word-specific heteronym table** and has no runtime dependency on Lexhint, G2Lex, or Lexphon. The build pipeline supplies dictionary-entry objects; the runtime loads a generated JSON ambiguity index.
-
-## Package layout
-
-The Python package lives directly at `pronresolve/`. There is intentionally no `src/` directory.
+`pronresolve` discovers same-spelling, same-part-of-speech pronunciation ambiguity from dictionary data and chooses a reading from sentence context only when evidence is strong enough. It is an alpha, data-driven MVP: there is no word-specific heteronym table and no runtime dependency on Lexhint, G2Lex, or Lexphon.
 
 ## Install
 
 ```bash
-python -m pip install .
+python -m pip install pronresolve
 ```
 
-Versioning is VCS-driven through `setuptools-scm`. When installed from a source archive without Git metadata, the configured fallback version is `0.1.0.dev0`. Release builds should be made from version tags.
-
-For development:
+For development and documentation:
 
 ```bash
-python -m pip install -e ".[dev]"
-pytest
+python -m pip install -e ".[dev,docs]"
+python -m pytest
+python -m sphinx -W --keep-going -b html docs docs/_build/html
 ```
 
-## Discover candidate readings from Lexhint entries
+Versions are derived from Git tags with `setuptools-scm`. Source archives without Git metadata use the configured development fallback version.
+The current CI matrix verifies Python 3.10–3.13; Python 3.14 has not yet been added to the supported/tested release matrix.
 
-The builder accepts Lexhint-style `DictionaryEntry` objects or dictionaries with the same fields. It deliberately accepts an iterable so a caller can stream entries instead of loading the full dictionary into memory.
+## Concept and discovery
+
+The build pipeline streams dictionary-entry mappings or objects into `discover_ambiguities()`. The package groups by normalized spelling and POS, normalizes pronunciations, and generates stable reading IDs.
 
 ```python
 from pronresolve import discover_ambiguities, save_index
 
-# lexicon.iter_entries() is the proposed Lexhint streaming API described in
-# implementation-briefs/01_lexhint_entry_stream.md.
-result = discover_ambiguities(
-    lexicon.iter_entries(),
-    language="en",
-    locale="en-US",
-)
+result = discover_ambiguities(lexicon.iter_entries(), language="en", locale="en-US")
 save_index(result.index, "en-us.pronresolve.json")
 print(result.report.as_dict())
 ```
 
-For a standalone smoke test, the CLI accepts JSONL records with `word`, `pos`, `pronunciations` (or `sounds`), `senses`, and optional `etymology_number` fields:
-
-```bash
-pronresolve build \
-  --input-jsonl dictionary-entries.jsonl \
-  --output en-us.pronresolve.json \
-  --language en \
-  --locale en-US
-pronresolve inspect en-us.pronresolve.json
-```
+A key with only one IPA is not ambiguous. Multiple IPA values on one source entry are treated as unlinked ambiguity and omitted rather than guessed. Entries with missing or empty POS are excluded from automatic resolution and counted in `entries_without_pos` in the discovery report. Missing pronunciation is also counted separately.
 
 ## Runtime resolution
 
-The resolver needs the original sentence and the target token's character offsets. Supply POS and lemma when the frontend has them.
+Load the generated file and provide original sentence text and target character offsets. POS and lemma are useful when the caller has them:
 
 ```python
 from pronresolve import Resolver
@@ -67,42 +48,54 @@ decision = resolver.resolve(
     pos="NOUN",
     lemma="bow",
 )
-
 if decision is not None:
-    selector = decision.selector  # e.g. "READING:r1-en-<stable-id>"
+    selector = decision.selector
     ipa = decision.ipa
-    print(selector, ipa, decision.score, decision.evidence_terms)
 ```
 
-The selector is intended to be passed through an existing selector-aware lexicon lookup. If the resolver returns `None`, keep the current default/POS pronunciation path.
+A `None` result means the existing default pronunciation path should remain in use. The resolver is deterministic and explainable, not a claim of linguistic certainty.
 
-## MVP discovery rules
+## CLI
 
-The discovery step groups entries by normalized spelling and POS.
+```bash
+pronresolve --help
+pronresolve build --input-jsonl entries.jsonl --output index.json --language en --locale en-US
+pronresolve inspect index.json
+pronresolve validate index.json
+```
 
-- One distinct IPA across entries: not ambiguous.
-- Multiple distinct IPA values attached to different entries, where each contributing entry has exactly one normalized IPA: resolvable candidate profiles are generated. The profile inherits that entry's sense evidence.
-- Multiple distinct IPA values on the same entry: classified as unlinked ambiguity and **not** turned into a context-resolution profile. The source does not tell us which sense belongs to which IPA, so the MVP refuses to guess.
-- Missing IPA: ignored for candidate generation and counted in the report.
+`build` reads one JSON object per non-empty JSONL line and writes an index plus `<output>.report.json`. `inspect` and `validate` print a summary. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
 
-The MVP does not yet infer morphological lemmas, perform embedding-based similarity, or train a classifier. Context matching uses Unicode tokenization and weighted exact-token overlap across glosses, topics, tags, examples, synonyms, and antonyms. It is deterministic and explainable, not a claim of linguistic certainty.
+## JSON index schema
 
-`locale` is stored as index metadata but the MVP does not apply locale-specific pronunciation filtering itself. Generate separate locale-specific indexes from correctly filtered source data when regional variants must be separated.
+Schema version 1 is a JSON object with required root fields:
 
-## JSON index
+- `schema_version`: integer exactly `1`;
+- `language`: non-empty string;
+- `locale`: string or `null`;
+- `profiles`: array of profile objects.
 
-Schema version 1 contains:
+Every profile requires non-empty string `word`, `pos`, and `reading_id`, plus a non-empty `ipa` array of non-empty strings. Optional evidence arrays (`sense_ids`, `etymology_numbers`, `glosses`, `topics`, `tags`, `examples`, `synonyms`, `antonyms`) contain strings. Unknown fields are ignored for forward-compatible readers; unsupported schema versions are rejected. Malformed structures are rejected rather than coerced.
 
-- `language`, `locale`, and `schema_version`
-- `profiles`: one profile per generated reading
-- stable reading IDs based on language, normalized word, normalized POS, and IPA
-- sense IDs and the Lexhint evidence used for scoring
-
-Index files should be built alongside the pronunciation lexicon and published with matching dataset/version metadata. Do not independently update one without the other.
+Dataset/version identity belongs to the containing lexicon data package or artifact metadata, not to the v1 index JSON. Publish the index alongside the matching pronunciation lexicon and keep their dataset versions aligned.
 
 ## Integration boundary
 
-- `lexhint`: add a public streaming `Lexicon.iter_entries()` API (implementation brief 01).
-- `g2lex-data`: generate the JSON index and add `READING:<reading_id>` selectors to the corresponding lexicon entries (brief 02).
-- G2P frontends: pass token spans, POS, and lemma to the resolver and use the returned selector (briefs 03–06).
-- Based on the current interfaces reviewed, G2Lex already supports arbitrary selector names and Lexphon already passes a selector tag to lookup. No functional changes to those packages are expected for this MVP; add compatibility tests where they are consumed.
+The producer supplies dictionary entries and locale-filtered source data. Consumers load the generated index, pass token spans/context to the resolver, and apply the returned `READING:<reading_id>` selector through their existing selector-aware lookup. Locale is stored as metadata only; runtime locale filtering is not performed here.
+
+## Limitations
+
+- No morphological lemmatization: matching uses exact normalized context tokens.
+- No runtime locale filtering; prepare correctly filtered locale-specific indexes upstream.
+- No automatic sense-to-IPA linking when one source entry has multiple IPA values.
+- Entries without POS are skipped by discovery and counted in its report.
+- Resolver thresholds are heuristic defaults; conservative abstention is expected when context is weak or scores are close.
+- Antonyms currently count as positive related-term evidence, not negative evidence.
+
+## Documentation
+
+The full user guide and public API reference are in the [Sphinx documentation](docs/index.md). Build with `python -m pip install -e ".[docs]"` followed by `python -m sphinx -W --keep-going -b html docs docs/_build/html`.
+
+## License
+
+Apache License, Version 2.0. See [LICENSE](LICENSE).

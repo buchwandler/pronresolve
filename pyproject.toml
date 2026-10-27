@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "setuptools-scm[toml]>=8"]
+requires = ["setuptools>=77", "setuptools-scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,13 @@ dynamic = ["version"]
 description = "Data-driven pronunciation ambiguity discovery and context resolution"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Lexicon g2p contributors" }]
 keywords = ["pronunciation", "heteronyms", "g2p", "lexicon", "phonemization"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -25,7 +25,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "build>=1", "mypy>=1.11", "ruff>=0.6"]
+dev = ["pytest>=8", "build>=1", "mypy>=1.11", "ruff==0.17.2"]
+docs = ["sphinx>=7", "myst-parser>=3", "sphinx-rtd-theme>=2"]
 
 [project.scripts]
 pronresolve = "pronresolve.cli:main"
@@ -49,3 +50,6 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
