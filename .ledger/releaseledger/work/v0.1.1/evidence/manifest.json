@@ -1,0 +1,41 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 1171,
+      "deletions": 292,
+      "patch_file": "5471e6d.patch",
+      "patch_sha256": "5e7d127b3e40ba566f36e95a0a16c714f2c6ef1918443da0a0c8f2b21ab3e368",
+      "paths": [
+        "README.md",
+        "docs/index.md",
+        "pronresolve/__init__.py",
+        "pronresolve/cli.py",
+        "pronresolve/compile.py",
+        "pronresolve/discovery.py",
+        "pronresolve/models.py",
+        "pronresolve/normalization.py",
+        "pronresolve/resolver.py",
+        "pronresolve/storage.py",
+        "tests/test_cli.py",
+        "tests/test_compilation.py",
+        "tests/test_discovery.py",
+        "tests/test_models.py",
+        "tests/test_resolver.py",
+        "tests/test_schema_v2.py",
+        "tests/test_storage.py"
+      ],
+      "sha": "5471e6db76347e73d0759c45242cd6ebdef11b1f",
+      "short_sha": "5471e6d",
+      "source_ref": "git:5471e6db76347e73d0759c45242cd6ebdef11b1f"
+    }
+  ],
+  "git_base_ref": "03ec09283807ee7354289b2141fbbe08019ef96b",
+  "git_base_sha": "03ec09283807ee7354289b2141fbbe08019ef96b",
+  "git_head_ref": "5471e6db76347e73d0759c45242cd6ebdef11b1f",
+  "git_head_sha": "5471e6db76347e73d0759c45242cd6ebdef11b1f",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.1",
+  "schema_version": 1
+}

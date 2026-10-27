@@ -1,0 +1,28 @@
+rows:
+  - sha: 5471e6db76347e73d0759c45242cd6ebdef11b1f
+    inspected: false
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - pronresolve/__init__.py
+      - pronresolve/cli.py
+      - pronresolve/compile.py
+      - pronresolve/discovery.py
+      - pronresolve/models.py
+      - pronresolve/normalization.py
+      - pronresolve/resolver.py
+      - pronresolve/storage.py
+      - tests/test_cli.py
+      - tests/test_compilation.py
+      - tests/test_discovery.py
+      - tests/test_models.py
+      - tests/test_resolver.py
+      - tests/test_schema_v2.py
+      - tests/test_storage.py
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

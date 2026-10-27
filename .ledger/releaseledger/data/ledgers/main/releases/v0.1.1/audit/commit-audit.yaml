@@ -1,0 +1,75 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.1
+git_base_ref: v0.1.0
+git_base_sha: 03ec09283807ee7354289b2141fbbe08019ef96b
+git_head_ref: HEAD
+git_head_sha: 5471e6db76347e73d0759c45242cd6ebdef11b1f
+git_range: 03ec09283807ee7354289b2141fbbe08019ef96b..5471e6db76347e73d0759c45242cd6ebdef11b1f
+commit_count: 1
+rows:
+  - sha: 5471e6db76347e73d0759c45242cd6ebdef11b1f
+    source_ref: git:5471e6db76347e73d0759c45242cd6ebdef11b1f
+    short_sha: 5471e6d
+    changed_paths:
+      - README.md
+      - docs/index.md
+      - pronresolve/__init__.py
+      - pronresolve/cli.py
+      - pronresolve/compile.py
+      - pronresolve/discovery.py
+      - pronresolve/models.py
+      - pronresolve/normalization.py
+      - pronresolve/resolver.py
+      - pronresolve/storage.py
+      - tests/test_cli.py
+      - tests/test_compilation.py
+      - tests/test_discovery.py
+      - tests/test_models.py
+      - tests/test_resolver.py
+      - tests/test_schema_v2.py
+      - tests/test_storage.py
+    stats:
+      files_changed: 17
+      insertions: 1171
+      deletions: 292
+    inspected: true
+    inspected_paths:
+      - README.md
+      - docs/index.md
+      - pronresolve/__init__.py
+      - pronresolve/cli.py
+      - pronresolve/compile.py
+      - pronresolve/discovery.py
+      - pronresolve/models.py
+      - pronresolve/normalization.py
+      - pronresolve/resolver.py
+      - pronresolve/storage.py
+      - tests/test_cli.py
+      - tests/test_compilation.py
+      - tests/test_discovery.py
+      - tests/test_models.py
+      - tests/test_resolver.py
+      - tests/test_schema_v2.py
+      - tests/test_storage.py
+    observed_behavior:
+      Runtime indexes are now emitted as compact deterministic schema-v2
+      JSON, with normalized words grouped by part of speech and readings carrying scalar
+      IPA, sense IDs, and precompiled weighted lexical cues. The loader retains schema-v1
+      compatibility by compiling legacy evidence into the new cue model; examples and
+      etymology numbers are excluded from runtime scoring. Resolver selection now uses
+      precompiled cues, supports optional word-specific CLI inspection, and exposes
+      matched evidence terms and sense IDs. Documentation and tests cover the new format,
+      compatibility, validation, and scoring behavior.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: better concept"
+    target_entry_id: entry-0001
+    notes:
+      Reviewed the implementation, documentation, and regression tests across all
+      changed paths. The public runtime model and serialized index shape changed, while
+      schema-v1 loading remains supported.

@@ -1,0 +1,2009 @@
+ README.md                    |  31 +++--
+ docs/index.md                |  27 ++++-
+ pronresolve/__init__.py      |   7 +-
+ pronresolve/cli.py           |  63 ++++++++--
+ pronresolve/compile.py       |  41 +++++++
+ pronresolve/discovery.py     |  11 +-
+ pronresolve/models.py        | 272 ++++++++++++++++++++++++++++++++-----------
+ pronresolve/normalization.py |  61 ++++++++--
+ pronresolve/resolver.py      |  58 ++++-----
+ pronresolve/storage.py       | 124 +++++++++++++++++++-
+ tests/test_cli.py            | 116 +++++++++++++++++-
+ tests/test_compilation.py    |  97 +++++++++++++++
+ tests/test_discovery.py      |  21 +++-
+ tests/test_models.py         |  91 ++++++---------
+ tests/test_resolver.py       | 207 ++++++++++++++++++++------------
+ tests/test_schema_v2.py      | 147 +++++++++++++++++++++++
+ tests/test_storage.py        |  89 ++++++++++++--
+ 17 files changed, 1171 insertions(+), 292 deletions(-)
+
+diff --git a/README.md b/README.md
+index 1d1bc65..655cd71 100644
+--- a/README.md
++++ b/README.md
+@@ -60,24 +60,35 @@ A `None` result means the existing default pronunciation path should remain in u
+ ```bash
+ pronresolve --help
+ pronresolve build --input-jsonl entries.jsonl --output index.json --language en --locale en-US
+-pronresolve inspect index.json
++pronresolve inspect index.json [--word WORD]
+ pronresolve validate index.json
+ ```
+
+-`build` reads one JSON object per non-empty JSONL line and writes an index plus `<output>.report.json`. `inspect` and `validate` print a summary. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
++`build` reads one JSON object per non-empty JSONL line and writes a compact v2 index plus `<output>.report.json`. `inspect` prints summary counts; add `--word WORD` to view each reading's IPA, sense IDs, and weighted cues. `validate` accepts v1 and v2. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
+
+-## JSON index schema
++## What pronresolve stores
+
+-Schema version 1 is a JSON object with required root fields:
++The resolver index is a compact decision artifact, not a copy of dictionary records. Schema v2 groups candidates by normalized word and POS. Each runtime reading profile contains a reading ID, scalar IPA, sense IDs, and normalized cue tokens grouped by weight. Raw gloss, synonym, topic, tag, antonym, example, and etymology prose is not stored in runtime profiles.
+
+-- `schema_version`: integer exactly `1`;
+-- `language`: non-empty string;
+-- `locale`: string or `null`;
+-- `profiles`: array of profile objects.
++### Policy B runtime scoring
+
+-Every profile requires non-empty string `word`, `pos`, and `reading_id`, plus a non-empty `ipa` array of non-empty strings. Optional evidence arrays (`sense_ids`, `etymology_numbers`, `glosses`, `topics`, `tags`, `examples`, `synonyms`, `antonyms`) contain strings. Unknown fields are ignored for forward-compatible readers; unsupported schema versions are rejected. Malformed structures are rejected rather than coerced.
++| Evidence field | Weight |
++| -------------- | -----: |
++| Synonyms       |    3.5 |
++| Glosses        |    3.0 |
++| Topics         |    2.5 |
++| Tags           |    1.0 |
++| Antonyms       |   0.75 |
+
+-Dataset/version identity belongs to the containing lexicon data package or artifact metadata, not to the v1 index JSON. Publish the index alongside the matching pronunciation lexicon and keep their dataset versions aligned.
++Examples are excluded from runtime scoring and serialized cues. They are disproportionately large, can contain incidental words unrelated to sense identity, and are unnecessary for compact lexical matching; they may still be retained privately as build/audit evidence. Repeated cue tokens keep their maximum field weight rather than adding weights. Antonyms retain positive-association behavior for parity; signed or removed antonym evidence is deferred.
++
++### Schema compatibility
++
++New indexes are written as compact, deterministic schema v2 JSON. The loader also accepts schema v1, compiles its synonyms, glosses, topics, tags, and antonyms into Policy B cues, and deliberately ignores examples and etymology numbers for runtime resolution. Therefore v1 scores are not guaranteed to match the previous resolver when examples contributed evidence.
++
++The runtime `ReadingProfile` API intentionally changed: IPA is scalar and lexical evidence is exposed as compiled `Cue` values instead of raw prose fields. `Resolution.ipa` is also scalar. Callers should use the returned `sense_ids`, `evidence_terms`, and reading ID for runtime explanation and selection.
++
++Schema-v2 JSON uses `schema_version`, `language`, `locale`, and an `entries` object grouped as `word -> POS -> candidates`; each candidate stores `id`, scalar `ipa`, optional `sense_ids`, and `cues` grouped by weight. Unsupported versions and malformed structures are rejected. Dataset/version identity belongs to the containing lexicon package or artifact metadata, not the index JSON; publish the index beside its matching pronunciation lexicon.
+
+ ## Integration boundary
+
+diff --git a/docs/index.md b/docs/index.md
+index 80e1f85..6d2fbc4 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -6,6 +6,7 @@
+ :maxdepth: 2
+
+ api
++changelog
+ ```
+
+ ## Installation
+@@ -14,7 +15,7 @@ Install the published package with `python -m pip install pronresolve`. To build
+
+ ## Concept
+
+-The package separates offline discovery from runtime resolution. Dictionary entries are grouped by normalized spelling and POS. Stable reading identifiers connect generated profiles to the pronunciation lexicon. The runtime loads a JSON index and scores exact normalized context-token overlap; it does not access dictionary services.
++The package separates offline discovery from runtime resolution. Discovery safely links readings to source senses, then compiles useful evidence into normalized weighted cues. Schema-v2 indexes group candidates by normalized word and POS; runtime resolution matches sentence tokens directly against precompiled cues without dictionary-service access or repeated profile tokenization.
+
+ ## Discovery pipeline
+
+@@ -22,7 +23,7 @@ Call `discover_ambiguities(entries, language="en", locale="en-US")` with a reusa
+
+ ## Runtime resolution
+
+-Use `Resolver.from_path(index_path)` and `resolve(text, start, end, pos=..., lemma=...)`. Offsets refer to the original sentence's character positions. The resolver returns a `Resolution` or `None`; abstention is intentional when the word is unknown, cues are absent, the best score is too weak, or the top candidates are too close. If it abstains, keep the existing default pronunciation behavior.
++Use `Resolver.from_path(index_path)` and `resolve(text, start, end, pos=..., lemma=...)`. Offsets refer to original sentence character positions. The resolver scores normalized context tokens against precompiled weighted cues and returns a `Resolution` or `None`. Matched cue tokens and sense IDs provide runtime explanation without retaining dictionary prose. Abstention is intentional when the word is unknown, cues are absent, the best score is too weak, or the top candidates are too close.
+
+ `resolve_token()` accepts mappings and spaCy-like token objects. POS and lemma are optional; if POS is omitted where the index has multiple POS groups, resolution abstains.
+
+@@ -32,11 +33,29 @@ The default score and margin thresholds are heuristic. Context matching ignores
+
+ ## JSON index format
+
+-Schema version 1 requires root fields `schema_version` (integer `1`), `language` (non-empty string), `locale` (string or null), and `profiles` (array). Each profile requires non-empty string `word`, `pos`, and `reading_id`, and a non-empty array of non-empty IPA strings. Optional evidence arrays contain strings. Unknown fields are ignored; unsupported schema versions and malformed values are rejected. Dataset/version metadata belongs to the containing data package/artifact rather than the index JSON.
++## What the runtime stores
++
++The compact v2 runtime index is a decision artifact, not a dictionary-record copy. It groups candidates as `word -> POS -> readings`; each reading stores an ID, scalar IPA, optional sense IDs, and cues grouped by weight. Raw glosses, synonyms, topics, tags, antonyms, examples, and etymology numbers are not retained in runtime profiles.
++
++## Policy B scoring
++
++| Evidence field | Weight |
++| -------------- | -----: |
++| Synonyms       |    3.5 |
++| Glosses        |    3.0 |
++| Topics         |    2.5 |
++| Tags           |    1.0 |
++| Antonyms       |   0.75 |
++
++Examples are excluded from compiled cues, the runtime index, and scoring. They are disproportionately large and often contain incidental words unrelated to sense identity; private discovery/build evidence may retain them for audit purposes. Duplicate tokens use the maximum field weight, not a sum. Antonyms intentionally retain positive-association behavior at 0.75; signed/removal semantics are deferred.
++
++## Schema compatibility
++
++New indexes are written as compact deterministic schema v2 JSON. The loader accepts both v1 and v2; loading v1 compiles synonyms, glosses, topics, tags, and antonyms into Policy B cues, ignores examples and etymology numbers for runtime, preserves sense IDs, and normalizes a validated one-pronunciation IPA array to scalar IPA. This intentionally does not guarantee legacy v1 score parity when examples affected the old resolver. The runtime `ReadingProfile` and `Resolution.ipa` shapes intentionally use scalar IPA and compiled cues instead of raw evidence prose.
+
+ ## CLI
+
+-`pronresolve build --input-jsonl entries.jsonl --output index.json --language en` builds the index and a sibling `.report.json` file. `pronresolve inspect index.json` and `pronresolve validate index.json` print a summary. Invalid user input returns exit code 2 with a concise stderr error and no traceback.
++`pronresolve build --input-jsonl entries.jsonl --output index.json --language en` writes a compact v2 index and sibling `.report.json`. `pronresolve inspect index.json` prints summary counts; add `--word WORD` to see readings, scalar IPA, sense IDs, and weighted cues. `pronresolve validate index.json` accepts v1 and v2. Invalid user input returns exit code 2 with a concise stderr error and no traceback.
+
+ ## Integration boundary
+
+diff --git a/pronresolve/__init__.py b/pronresolve/__init__.py
+index 881a502..15e85b0 100644
+--- a/pronresolve/__init__.py
++++ b/pronresolve/__init__.py
+@@ -8,6 +8,7 @@ except ImportError:  # Source checkout before setuptools-scm has generated _vers
+ from .discovery import discover_ambiguities, reading_id_for
+ from .models import (
+     AmbiguityIndex,
++    Cue,
+     CandidateScore,
+     DiscoveryReport,
+     DiscoveryResult,
+@@ -15,18 +16,22 @@ from .models import (
+     Resolution,
+ )
+ from .resolver import Resolver
+-from .storage import load_index, save_index
++from .storage import decode_v1, decode_v2, encode_v2, load_index, save_index
+
+ __all__ = [
+     "__version__",
+     "AmbiguityIndex",
+     "CandidateScore",
++    "Cue",
+     "DiscoveryReport",
+     "DiscoveryResult",
+     "ReadingProfile",
+     "Resolution",
+     "Resolver",
+     "discover_ambiguities",
++    "decode_v1",
++    "decode_v2",
++    "encode_v2",
+     "load_index",
+     "reading_id_for",
+     "save_index",
+diff --git a/pronresolve/cli.py b/pronresolve/cli.py
+index 2085662..5a183f4 100644
+--- a/pronresolve/cli.py
++++ b/pronresolve/cli.py
+@@ -5,11 +5,12 @@ from __future__ import annotations
+ import argparse
+ import json
+ import sys
++from collections.abc import Iterable
+ from pathlib import Path
+ from typing import Any
+-from collections.abc import Iterable
+
+ from .discovery import discover_ambiguities
++from .normalization import normalize_word
+ from .storage import load_index, save_index
+
+
+@@ -27,6 +28,35 @@ def _jsonl_entries(path: Path) -> Iterable[dict[str, Any]]:
+             yield value
+
+
++def _source_schema_version(path: Path) -> Any:
++    value = json.loads(path.read_text(encoding="utf-8"))
++    return value.get("schema_version") if isinstance(value, dict) else None
++
++
++def _index_summary(index, source_schema_version: Any) -> dict[str, Any]:
++    profiles = index.profiles
++    groups = {(profile.word, profile.pos) for profile in profiles}
++    cue_count = sum(len(profile.cues) for profile in profiles)
++    word_count = len({profile.word for profile in profiles})
++    return {
++        "valid": True,
++        "schema_version": source_schema_version,
++        "runtime_schema_version": index.schema_version,
++        "language": index.language,
++        "locale": index.locale,
++        "ambiguous_word_count": word_count,
++        "ambiguous_words": word_count,
++        "word_pos_group_count": len(groups),
++        "profile_count": len(profiles),
++        "cue_count": cue_count,
++        "average_cues_per_profile": round(cue_count / len(profiles), 3) if profiles else 0.0,
++    }
++
++
++def _weighted_cues(profile) -> dict[str, list[str]]:
++    return profile.to_dict()["cues"]
++
++
+ def main(argv: list[str] | None = None) -> int:
+     parser = argparse.ArgumentParser(prog="pronresolve")
+     subparsers = parser.add_subparsers(dest="command", required=True)
+@@ -37,10 +67,11 @@ def main(argv: list[str] | None = None) -> int:
+     build.add_argument("--language", required=True)
+     build.add_argument("--locale")
+
+-    inspect = subparsers.add_parser("inspect", help="print index summary")
++    inspect = subparsers.add_parser("inspect", help="print index summary and optional word details")
+     inspect.add_argument("index", type=Path)
++    inspect.add_argument("--word", help="show readings and weighted cues for one word")
+
+-    validate = subparsers.add_parser("validate", help="validate an index schema")
++    validate = subparsers.add_parser("validate", help="validate a v1 or v2 index schema")
+     validate.add_argument("index", type=Path)
+
+     args = parser.parse_args(argv)
+@@ -62,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
+                 json.dumps(
+                     {
+                         "index": str(args.output),
++                        "schema_version": result.index.schema_version,
+                         "report": str(report_path),
+                         **result.report.as_dict(),
+                     },
+@@ -71,15 +103,24 @@ def main(argv: list[str] | None = None) -> int:
+             )
+             return 0
+
++        source_schema_version = _source_schema_version(args.index)
+         index = load_index(args.index)
+-        summary = {
+-            "valid": True,
+-            "schema_version": index.schema_version,
+-            "language": index.language,
+-            "locale": index.locale,
+-            "profile_count": len(index.profiles),
+-            "ambiguous_words": len({profile.word.casefold() for profile in index.profiles}),
+-        }
++        summary = _index_summary(index, source_schema_version)
++        if args.command == "inspect" and args.word is not None:
++            word = normalize_word(args.word)
++            summary["word"] = word
++            summary["readings"] = [
++                {
++                    "word": profile.word,
++                    "pos": profile.pos,
++                    "reading_id": profile.reading_id,
++                    "ipa": profile.ipa,
++                    "sense_ids": list(profile.sense_ids),
++                    "weighted_cues": _weighted_cues(profile),
++                }
++                for profile in index.profiles
++                if profile.word == word
++            ]
+         print(json.dumps(summary, ensure_ascii=False, indent=2))
+         return 0
+     except (OSError, ValueError, json.JSONDecodeError) as exc:
+diff --git a/pronresolve/compile.py b/pronresolve/compile.py
+new file mode 100644
+index 0000000..485abf4
+--- /dev/null
++++ b/pronresolve/compile.py
+@@ -0,0 +1,41 @@
++"""Compile rich build-time lexical evidence into compact runtime cues."""
++
++from __future__ import annotations
++
++from collections.abc import Iterable, Mapping
++
++from .models import Cue
++from .normalization import STOPWORDS, tokens
++
++# One owner for runtime scoring policy. Examples intentionally do not participate.
++EVIDENCE_WEIGHTS: dict[str, float] = {
++    "synonyms": 3.5,
++    "glosses": 3.0,
++    "topics": 2.5,
++    "tags": 1.0,
++    # TODO: Antonyms currently behave as positive lexical association. Review
++    # separately for removal or signed evidence; do not change this weight here.
++    "antonyms": 0.75,
++}
++
++
++def compile_cues(evidence: Mapping[str, Iterable[str]]) -> tuple[Cue, ...]:
++    """Return unique, deterministically ordered cues compiled under Policy B.
++
++    Every field is tokenized with the same normalization rules as sentence
++    context. If a token occurs in multiple evidence fields, its maximum weight
++    is retained rather than summing the evidence.
++    """
++    weights: dict[str, float] = {}
++    for field, weight in EVIDENCE_WEIGHTS.items():
++        values = evidence.get(field, ())
++        if isinstance(values, str):
++            values = (values,)
++        for value in values:
++            if not isinstance(value, str):
++                continue
++            for token in tokens(value):
++                if token in STOPWORDS:
++                    continue
++                weights[token] = max(weights.get(token, 0.0), weight)
++    return tuple(Cue(token=token, weight=weights[token]) for token in sorted(weights))
+diff --git a/pronresolve/discovery.py b/pronresolve/discovery.py
+index 459f150..c43bbe4 100644
+--- a/pronresolve/discovery.py
++++ b/pronresolve/discovery.py
+@@ -10,6 +10,7 @@ from collections import defaultdict
+ from collections.abc import Iterable, Mapping
+ from typing import Any
+
++from .compile import compile_cues
+ from .models import AmbiguityIndex, DiscoveryReport, DiscoveryResult, ReadingProfile
+ from .normalization import normalize_ipa, normalize_pos, normalize_word
+
+@@ -216,15 +217,9 @@ def discover_ambiguities(
+                     word=display_word,
+                     pos=pos,
+                     reading_id=reading_id_for(language, normalized_word, pos, ipa),
+-                    ipa=(ipa,),
++                    ipa=ipa,
+                     sense_ids=unique["sense_ids"],
+-                    etymology_numbers=unique["etymology_numbers"],
+-                    glosses=unique["glosses"],
+-                    topics=unique["topics"],
+-                    tags=unique["tags"],
+-                    examples=unique["examples"],
+-                    synonyms=unique["synonyms"],
+-                    antonyms=unique["antonyms"],
++                    cues=compile_cues(unique),
+                 )
+             )
+
+diff --git a/pronresolve/models.py b/pronresolve/models.py
+index 4fa6f38..8583763 100644
+--- a/pronresolve/models.py
++++ b/pronresolve/models.py
+@@ -1,12 +1,15 @@
+-"""Immutable public data models and JSON schema conversion."""
++"""Immutable runtime data models and schema-v2 conversion."""
+
+ from __future__ import annotations
+
++import math
++from collections.abc import Mapping
+ from dataclasses import dataclass
+ from typing import Any
+-from collections.abc import Mapping
+
+-INDEX_SCHEMA_VERSION = 1
++from .normalization import normalize_ipa, normalize_pos, normalize_word, tokens
++
++INDEX_SCHEMA_VERSION = 2
+
+
+ def _required_string(value: Mapping[str, Any], field: str, path: str) -> str:
+@@ -15,7 +18,7 @@ def _required_string(value: Mapping[str, Any], field: str, path: str) -> str:
+     item = value[field]
+     if not isinstance(item, str) or not item.strip():
+         raise ValueError(f"{path}.{field} must be a non-empty string")
+-    return item
++    return item.strip()
+
+
+ def _string_array(value: Mapping[str, Any], field: str, path: str) -> tuple[str, ...]:
+@@ -27,66 +30,98 @@ def _string_array(value: Mapping[str, Any], field: str, path: str) -> tuple[str,
+     return tuple(items)
+
+
+-def _profile_strings(value: Mapping[str, Any], path: str) -> dict[str, str]:
+-    return {
+-        "word": _required_string(value, "word", path),
+-        "pos": _required_string(value, "pos", path),
+-        "reading_id": _required_string(value, "reading_id", path),
+-    }
++def _weight_key(weight: float) -> str:
++    return str(int(weight)) if weight.is_integer() else format(weight, ".15g")
++
++
++def _parsed_weight(value: Any, path: str) -> float:
++    if not isinstance(value, str) or not value.strip():
++        raise ValueError(f"{path} must be a numeric cue weight")
++    try:
++        weight = float(value)
++    except ValueError as exc:
++        raise ValueError(f"{path} must be a numeric cue weight") from exc
++    if not math.isfinite(weight) or weight <= 0:
++        raise ValueError(f"{path} must be a finite positive cue weight")
++    return weight
++
++
++@dataclass(frozen=True, slots=True)
++class Cue:
++    """One normalized runtime token and its maximum evidence weight."""
++
++    token: str
++    weight: float
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.token, str):
++            raise ValueError("cue.token must be a string")
++        token = normalize_word(self.token)
++        if not token or tokens(token) != (token,):
++            raise ValueError("cue.token must be one non-empty normalized token")
++        if isinstance(self.weight, bool) or not isinstance(self.weight, (int, float)):
++            raise ValueError("cue.weight must be a finite positive number")
++        weight = float(self.weight)
++        if not math.isfinite(weight) or weight <= 0:
++            raise ValueError("cue.weight must be a finite positive number")
++        from .compile import EVIDENCE_WEIGHTS
++
++        if weight not in set(EVIDENCE_WEIGHTS.values()):
++            raise ValueError("cue.weight is not defined by the Policy B scoring policy")
++        object.__setattr__(self, "token", token)
++        object.__setattr__(self, "weight", weight)
+
+
+ @dataclass(frozen=True, slots=True)
+ class ReadingProfile:
++    """Lean runtime profile for one pronunciation and its compiled lexical cues."""
++
+     word: str
+     pos: str
+     reading_id: str
+-    ipa: tuple[str, ...]
++    ipa: str
+     sense_ids: tuple[str, ...] = ()
+-    etymology_numbers: tuple[str, ...] = ()
+-    glosses: tuple[str, ...] = ()
+-    topics: tuple[str, ...] = ()
+-    tags: tuple[str, ...] = ()
+-    examples: tuple[str, ...] = ()
+-    synonyms: tuple[str, ...] = ()
+-    antonyms: tuple[str, ...] = ()
++    cues: tuple[Cue, ...] = ()
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.word, str) or not normalize_word(self.word):
++            raise ValueError("profile.word must be a non-empty string")
++        if not isinstance(self.pos, str) or not self.pos.strip():
++            raise ValueError("profile.pos must be a non-empty string")
++        if not isinstance(self.reading_id, str) or not self.reading_id.strip():
++            raise ValueError("profile.reading_id must be a non-empty string")
++        if not isinstance(self.ipa, str):
++            raise ValueError("profile.ipa must be a non-empty scalar string")
++        ipa = normalize_ipa(self.ipa)
++        if not ipa:
++            raise ValueError("profile.ipa must be a non-empty scalar string")
++        if not isinstance(self.sense_ids, tuple) or any(
++            not isinstance(item, str) for item in self.sense_ids
++        ):
++            raise ValueError("profile.sense_ids must be a tuple of strings")
++        if not isinstance(self.cues, tuple) or any(not isinstance(item, Cue) for item in self.cues):
++            raise ValueError("profile.cues must be a tuple of Cue values")
++        tokens_seen = [cue.token for cue in self.cues]
++        if len(tokens_seen) != len(set(tokens_seen)):
++            raise ValueError("profile.cues must not contain duplicate tokens")
++        object.__setattr__(self, "word", normalize_word(self.word))
++        object.__setattr__(self, "pos", normalize_pos(self.pos))
++        object.__setattr__(self, "reading_id", self.reading_id.strip())
++        object.__setattr__(self, "ipa", ipa)
++        object.__setattr__(self, "sense_ids", tuple(sorted(set(self.sense_ids))))
++        object.__setattr__(self, "cues", tuple(sorted(self.cues, key=lambda cue: cue.token)))
+
+     def to_dict(self) -> dict[str, Any]:
++        grouped: dict[str, list[str]] = {}
++        for cue in self.cues:
++            grouped.setdefault(_weight_key(cue.weight), []).append(cue.token)
+         return {
+-            "word": self.word,
+-            "pos": self.pos,
+-            "reading_id": self.reading_id,
+-            "ipa": list(self.ipa),
++            "id": self.reading_id,
++            "ipa": self.ipa,
+             "sense_ids": list(self.sense_ids),
+-            "etymology_numbers": list(self.etymology_numbers),
+-            "glosses": list(self.glosses),
+-            "topics": list(self.topics),
+-            "tags": list(self.tags),
+-            "examples": list(self.examples),
+-            "synonyms": list(self.synonyms),
+-            "antonyms": list(self.antonyms),
++            "cues": {weight: sorted(values) for weight, values in sorted(grouped.items())},
+         }
+
+-    @classmethod
+-    def from_dict(cls, value: Mapping[str, Any], *, path: str = "profile") -> ReadingProfile:
+-        if not isinstance(value, Mapping):
+-            raise ValueError(f"{path} must be a JSON object")
+-        fields = _profile_strings(value, path)
+-        ipa = _string_array(value, "ipa", path)
+-        if not ipa or any(not item.strip() for item in ipa):
+-            raise ValueError(f"{path}.ipa must be a non-empty array of strings")
+-        return cls(
+-            **fields,
+-            ipa=ipa,
+-            sense_ids=_string_array(value, "sense_ids", path),
+-            etymology_numbers=_string_array(value, "etymology_numbers", path),
+-            glosses=_string_array(value, "glosses", path),
+-            topics=_string_array(value, "topics", path),
+-            tags=_string_array(value, "tags", path),
+-            examples=_string_array(value, "examples", path),
+-            synonyms=_string_array(value, "synonyms", path),
+-            antonyms=_string_array(value, "antonyms", path),
+-        )
+-
+
+ @dataclass(frozen=True, slots=True)
+ class AmbiguityIndex:
+@@ -101,13 +136,48 @@ class AmbiguityIndex:
+                 f"unsupported ambiguity index schema {self.schema_version}; "
+                 f"supported schema is {INDEX_SCHEMA_VERSION}"
+             )
++        if not isinstance(self.language, str) or not normalize_word(self.language):
++            raise ValueError("index.language must be a non-empty string")
++        if self.locale is not None and (
++            not isinstance(self.locale, str) or not self.locale.strip()
++        ):
++            raise ValueError("index.locale must be a non-empty string or null")
++        if not isinstance(self.profiles, tuple) or any(
++            not isinstance(profile, ReadingProfile) for profile in self.profiles
++        ):
++            raise ValueError("index.profiles must be a tuple of ReadingProfile values")
++        object.__setattr__(self, "language", normalize_word(self.language))
++        if self.locale is not None:
++            object.__setattr__(self, "locale", self.locale.strip())
++        object.__setattr__(
++            self,
++            "profiles",
++            tuple(
++                sorted(
++                    self.profiles,
++                    key=lambda profile: (
++                        profile.word,
++                        profile.pos,
++                        profile.ipa,
++                        profile.reading_id,
++                    ),
++                )
++            ),
++        )
+
+     def to_dict(self) -> dict[str, Any]:
++        entries: dict[str, dict[str, list[dict[str, Any]]]] = {}
++        for profile in self.profiles:
++            grouped_profiles = entries.setdefault(profile.word, {}).setdefault(profile.pos, [])
++            grouped_profiles.append(profile.to_dict())
+         return {
+-            "schema_version": self.schema_version,
++            "schema_version": INDEX_SCHEMA_VERSION,
+             "language": self.language,
+             "locale": self.locale,
+-            "profiles": [profile.to_dict() for profile in self.profiles],
++            "entries": {
++                word: {pos: profiles for pos, profiles in sorted(groups.items())}
++                for word, groups in sorted(entries.items())
++            },
+         }
+
+     @classmethod
+@@ -118,25 +188,93 @@ class AmbiguityIndex:
+         if isinstance(version, bool) or not isinstance(version, int):
+             raise ValueError("schema_version must be an integer")
+         if version != INDEX_SCHEMA_VERSION:
+-            raise ValueError(
+-                f"unsupported ambiguity index schema {version}; "
+-                f"supported schema is {INDEX_SCHEMA_VERSION}"
+-            )
++            raise ValueError(f"unsupported ambiguity index schema {version}")
+         language = _required_string(value, "language", "index")
+         if "locale" not in value:
+             raise ValueError("index.locale is required")
+         locale = value["locale"]
+-        if locale is not None and not isinstance(locale, str):
+-            raise ValueError("index.locale must be a string or null")
+-        raw_profiles = value.get("profiles")
+-        if not isinstance(raw_profiles, list):
+-            raise ValueError("index.profiles must be a JSON array")
++        if locale is not None and (not isinstance(locale, str) or not locale.strip()):
++            raise ValueError("index.locale must be a non-empty string or null")
++        entries = value.get("entries")
++        if not isinstance(entries, Mapping):
++            raise ValueError("index.entries must be a JSON object")
++
+         profiles: list[ReadingProfile] = []
+-        for position, item in enumerate(raw_profiles):
+-            profile_path = f"profiles[{position}]"
+-            if not isinstance(item, Mapping):
+-                raise ValueError(f"{profile_path} must be a JSON object")
+-            profiles.append(ReadingProfile.from_dict(item, path=profile_path))
++        seen_ids: set[str] = set()
++        seen_words: set[str] = set()
++        for raw_word, raw_groups in entries.items():
++            if not isinstance(raw_word, str) or not normalize_word(raw_word):
++                raise ValueError("index.entries contains an empty or invalid word key")
++            word = normalize_word(raw_word)
++            if word in seen_words:
++                raise ValueError(f"index.entries contains duplicate normalized word {word!r}")
++            seen_words.add(word)
++            if not isinstance(raw_groups, Mapping) or not raw_groups:
++                raise ValueError(f"entries[{raw_word!r}] must be a non-empty POS object")
++            seen_pos: set[str] = set()
++            for raw_pos, raw_candidates in raw_groups.items():
++                if not isinstance(raw_pos, str) or not raw_pos.strip():
++                    raise ValueError(f"entries[{raw_word!r}] contains an empty POS key")
++                pos = normalize_pos(raw_pos)
++                if pos in seen_pos:
++                    raise ValueError(
++                        f"entries[{raw_word!r}] contains duplicate normalized POS {pos!r}"
++                    )
++                seen_pos.add(pos)
++                if not isinstance(raw_candidates, list) or len(raw_candidates) < 2:
++                    raise ValueError(
++                        f"entries[{raw_word!r}][{raw_pos!r}] must contain at least two candidates"
++                    )
++                for position, raw_profile in enumerate(raw_candidates):
++                    path = f"entries[{raw_word!r}][{raw_pos!r}][{position}]"
++                    if not isinstance(raw_profile, Mapping):
++                        raise ValueError(f"{path} must be a JSON object")
++                    reading_id = _required_string(raw_profile, "id", path)
++                    if reading_id in seen_ids:
++                        raise ValueError(f"{path}.id duplicates reading ID {reading_id!r}")
++                    seen_ids.add(reading_id)
++                    ipa = _required_string(raw_profile, "ipa", path)
++                    sense_ids = _string_array(raw_profile, "sense_ids", path)
++                    raw_cues = raw_profile.get("cues")
++                    if not isinstance(raw_cues, Mapping):
++                        raise ValueError(f"{path}.cues must be a JSON object")
++                    from .compile import EVIDENCE_WEIGHTS
++
++                    allowed_weights = set(EVIDENCE_WEIGHTS.values())
++                    cue_values: list[Cue] = []
++                    seen_tokens: set[str] = set()
++                    for raw_weight, raw_tokens in raw_cues.items():
++                        weight = _parsed_weight(raw_weight, f"{path}.cues weight")
++                        if weight not in allowed_weights:
++                            raise ValueError(f"{path}.cues has unsupported weight {raw_weight!r}")
++                        if not isinstance(raw_tokens, list):
++                            raise ValueError(f"{path}.cues[{raw_weight!r}] must be an array")
++                        for raw_token in raw_tokens:
++                            if not isinstance(raw_token, str) or not raw_token.strip():
++                                raise ValueError(
++                                    f"{path}.cues contains a non-string or empty token"
++                                )
++                            token = normalize_word(raw_token)
++                            if tokens(token) != (token,):
++                                raise ValueError(
++                                    f"{path}.cues contains invalid cue token {raw_token!r}"
++                                )
++                            if token in seen_tokens:
++                                raise ValueError(
++                                    f"{path}.cues assigns token {token!r} more than once"
++                                )
++                            seen_tokens.add(token)
++                            cue_values.append(Cue(token, weight))
++                    profiles.append(
++                        ReadingProfile(
++                            word=word,
++                            pos=pos,
++                            reading_id=reading_id,
++                            ipa=ipa,
++                            sense_ids=sense_ids,
++                            cues=tuple(cue_values),
++                        )
++                    )
+         return cls(
+             language=language,
+             locale=locale,
+@@ -189,7 +327,7 @@ class Resolution:
+     word: str
+     pos: str
+     reading_id: str
+-    ipa: tuple[str, ...]
++    ipa: str
+     sense_ids: tuple[str, ...]
+     score: float
+     margin: float
+diff --git a/pronresolve/normalization.py b/pronresolve/normalization.py
+index 1687f13..26b276e 100644
+--- a/pronresolve/normalization.py
++++ b/pronresolve/normalization.py
+@@ -2,11 +2,55 @@
+
+ from __future__ import annotations
+
+-import re
+ import unicodedata
+ from dataclasses import dataclass
+
+-_WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
++
++def _is_word_base(char: str) -> bool:
++    return char != "_" and char.isalnum()
++
++
++def _consume_marks(value: str, position: int) -> int:
++    while position < len(value) and unicodedata.category(value[position]).startswith("M"):
++        position += 1
++    return position
++
++
++def _consume_word(value: str, position: int) -> int:
++    position += 1
++    position = _consume_marks(value, position)
++    used_apostrophe = False
++    while position < len(value):
++        if _is_word_base(value[position]):
++            position += 1
++            position = _consume_marks(value, position)
++        elif (
++            not used_apostrophe
++            and value[position] in "'’"
++            and position + 1 < len(value)
++            and _is_word_base(value[position + 1])
++        ):
++            used_apostrophe = True
++            position += 1
++            position += 1
++            position = _consume_marks(value, position)
++        else:
++            break
++    return position
++
++
++def _word_ranges(value: str) -> tuple[tuple[int, int], ...]:
++    result: list[tuple[int, int]] = []
++    position = 0
++    while position < len(value):
++        if not _is_word_base(value[position]):
++            position += 1
++            continue
++        start = position
++        position = _consume_word(value, position)
++        result.append((start, position))
++    return tuple(result)
++
+
+ # Generic function words only; this is not a word- or heteronym-specific list.
+ STOPWORDS = frozenset(
+@@ -40,7 +84,7 @@ def normalize_ipa(value: str) -> str:
+
+
+ def tokens(value: str) -> tuple[str, ...]:
+-    return tuple(normalize_word(match.group(0)) for match in _WORD_RE.finditer(value or ""))
++    return tuple(normalize_word(value[start:end]) for start, end in _word_ranges(value or ""))
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -52,12 +96,13 @@ class TokenSpan:
+
+
+ def token_spans(value: str) -> tuple[TokenSpan, ...]:
++    text = value or ""
+     return tuple(
+         TokenSpan(
+-            text=match.group(0),
+-            normalized=normalize_word(match.group(0)),
+-            start=match.start(),
+-            end=match.end(),
++            text=text[start:end],
++            normalized=normalize_word(text[start:end]),
++            start=start,
++            end=end,
+         )
+-        for match in _WORD_RE.finditer(value or "")
++        for start, end in _word_ranges(text)
+     )
+diff --git a/pronresolve/resolver.py b/pronresolve/resolver.py
+index 2a38218..7ed836e 100644
+--- a/pronresolve/resolver.py
++++ b/pronresolve/resolver.py
+@@ -8,18 +8,9 @@ from pathlib import Path
+ from typing import Any
+
+ from .models import AmbiguityIndex, CandidateScore, ReadingProfile, Resolution
+-from .normalization import STOPWORDS, normalize_pos, normalize_word, token_spans, tokens
++from .normalization import STOPWORDS, normalize_pos, normalize_word, token_spans
+ from .storage import load_index
+
+-_FIELD_WEIGHTS = {
+-    "glosses": 3.0,
+-    "synonyms": 3.5,
+-    "topics": 2.5,
+-    "examples": 2.0,
+-    "tags": 1.0,
+-    "antonyms": 0.75,
+-}
+-
+
+ class Resolver:
+     """Resolve a token only when lexical evidence and score margin are sufficient."""
+@@ -36,10 +27,20 @@ class Resolver:
+             raise ValueError("min_score and min_margin must be non-negative")
+         self.min_score = float(min_score)
+         self.min_margin = float(min_margin)
+-        by_word: dict[str, list[ReadingProfile]] = defaultdict(list)
++        by_word: dict[str, dict[str, list[ReadingProfile]]] = defaultdict(lambda: defaultdict(list))
++        self._cue_maps: dict[str, dict[str, float]] = {}
+         for profile in self.index.profiles:
+-            by_word[normalize_word(profile.word)].append(profile)
+-        self._by_word = dict(by_word)
++            word = normalize_word(profile.word)
++            pos = normalize_pos(profile.pos)
++            by_word[word][pos].append(profile)
++            self._cue_maps[profile.reading_id] = {cue.token: cue.weight for cue in profile.cues}
++        self._by_word = {
++            word: {
++                pos: tuple(sorted(profiles, key=lambda profile: profile.reading_id))
++                for pos, profiles in groups.items()
++            }
++            for word, groups in by_word.items()
++        }
+
+     @classmethod
+     def from_path(
+@@ -79,19 +80,15 @@ class Resolver:
+         if not word:
+             return None
+
+-        profiles = self._by_word.get(word, [])
+-        if not profiles:
++        pos_groups = self._by_word.get(word)
++        if not pos_groups:
+             return None
+-
+         if pos is not None:
+-            normalized_pos = normalize_pos(pos)
+-            profiles = [
+-                profile for profile in profiles if normalize_pos(profile.pos) == normalized_pos
+-            ]
++            profiles = pos_groups.get(normalize_pos(pos), ())
+         else:
+-            pos_groups = {normalize_pos(profile.pos) for profile in profiles}
+             if len(pos_groups) != 1:
+                 return None
++            profiles = next(iter(pos_groups.values()))
+         if len(profiles) < 2:
+             return None
+
+@@ -118,26 +115,11 @@ class Resolver:
+         scored: list[CandidateScore] = []
+         profile_by_id = {profile.reading_id: profile for profile in profiles}
+         for profile in profiles:
+-            field_tokens = {
+-                field_name: {
+-                    token
+-                    for value in getattr(profile, field_name)
+-                    for token in tokens(value)
+-                    if token not in STOPWORDS
+-                }
+-                for field_name in _FIELD_WEIGHTS
+-            }
++            candidate_cues = self._cue_maps[profile.reading_id]
+             score = 0.0
+             matched: list[str] = []
+             for term, distance in cue_distances.items():
+-                matching_weight = max(
+-                    (
+-                        weight
+-                        for field_name, weight in _FIELD_WEIGHTS.items()
+-                        if term in field_tokens[field_name]
+-                    ),
+-                    default=0.0,
+-                )
++                matching_weight = candidate_cues.get(term, 0.0)
+                 if matching_weight:
+                     # Adjacent evidence is strongest; distant cues still contribute.
+                     distance_factor = 1.0 / (1.0 + 0.15 * max(distance - 1, 0))
+diff --git a/pronresolve/storage.py b/pronresolve/storage.py
+index 3592ae2..9e9f6ee 100644
+--- a/pronresolve/storage.py
++++ b/pronresolve/storage.py
+@@ -1,19 +1,128 @@
+-"""JSON persistence for generated ambiguity indexes."""
++"""Versioned JSON codecs and compact persistence for ambiguity indexes."""
+
+ from __future__ import annotations
+
+ import json
++from collections.abc import Mapping
+ from pathlib import Path
++from typing import Any
+
+-from .models import AmbiguityIndex
++from .compile import compile_cues
++from .models import AmbiguityIndex, INDEX_SCHEMA_VERSION, ReadingProfile
++from .normalization import normalize_ipa
++
++
++def _required_string(value: Mapping[str, Any], field: str, path: str) -> str:
++    item = value.get(field)
++    if not isinstance(item, str) or not item.strip():
++        raise ValueError(f"{path}.{field} must be a non-empty string")
++    return item.strip()
++
++
++def _string_array(
++    value: Mapping[str, Any], field: str, path: str, *, required: bool = False
++) -> tuple[str, ...]:
++    if field not in value:
++        if required:
++            raise ValueError(f"{path}.{field} is required")
++        return ()
++    items = value[field]
++    if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
++        raise ValueError(f"{path}.{field} must be an array of strings")
++    return tuple(items)
++
++
++def encode_v2(index: AmbiguityIndex) -> dict[str, Any]:
++    """Encode an internal index using the compact grouped schema-v2 wire format."""
++    if not isinstance(index, AmbiguityIndex):
++        raise TypeError("encode_v2 expects an AmbiguityIndex")
++    payload = index.to_dict()
++    # Reuse the strict decoder to enforce emitted-group and ID/cue invariants.
++    decode_v2(payload)
++    return payload
++
++
++def decode_v2(value: Mapping[str, Any]) -> AmbiguityIndex:
++    """Validate and decode a schema-v2 payload into canonical runtime models."""
++    return AmbiguityIndex.from_dict(value)
++
++
++def decode_v1(value: Mapping[str, Any]) -> AmbiguityIndex:
++    """Decode rich v1 profiles, compiling Policy B cues and dropping raw evidence."""
++    if not isinstance(value, Mapping):
++        raise ValueError("ambiguity index root must be a JSON object")
++    version = value.get("schema_version")
++    if isinstance(version, bool) or not isinstance(version, int):
++        raise ValueError("schema_version must be an integer")
++    if version != 1:
++        raise ValueError(f"unsupported ambiguity index schema {version}; expected schema 1")
++
++    language = _required_string(value, "language", "index")
++    if "locale" not in value:
++        raise ValueError("index.locale is required")
++    locale = value["locale"]
++    if locale is not None and (not isinstance(locale, str) or not locale.strip()):
++        raise ValueError("index.locale must be a non-empty string or null")
++    raw_profiles = value.get("profiles")
++    if not isinstance(raw_profiles, list):
++        raise ValueError("index.profiles must be a JSON array")
++
++    profiles: list[ReadingProfile] = []
++    seen_ids: set[str] = set()
++    evidence_fields = ("synonyms", "glosses", "topics", "tags", "antonyms")
++    legacy_array_fields = (
++        "sense_ids",
++        "etymology_numbers",
++        "glosses",
++        "topics",
++        "tags",
++        "examples",
++        "synonyms",
++        "antonyms",
++    )
++    for position, raw_profile in enumerate(raw_profiles):
++        path = f"profiles[{position}]"
++        if not isinstance(raw_profile, Mapping):
++            raise ValueError(f"{path} must be a JSON object")
++        word = _required_string(raw_profile, "word", path)
++        pos = _required_string(raw_profile, "pos", path)
++        reading_id = _required_string(raw_profile, "reading_id", path)
++        if reading_id in seen_ids:
++            raise ValueError(f"{path}.reading_id duplicates reading ID {reading_id!r}")
++        seen_ids.add(reading_id)
++
++        raw_ipa = _string_array(raw_profile, "ipa", path, required=True)
++        if not raw_ipa or any(not item.strip() for item in raw_ipa):
++            raise ValueError(f"{path}.ipa must be a non-empty array of non-empty strings")
++        ipa_values = tuple(sorted({normalize_ipa(item) for item in raw_ipa} - {""}))
++        if len(ipa_values) != 1:
++            raise ValueError(f"{path}.ipa must identify exactly one non-empty pronunciation")
++
++        legacy_evidence = {
++            field: _string_array(raw_profile, field, path) for field in legacy_array_fields
++        }
++        cues = compile_cues({field: legacy_evidence[field] for field in evidence_fields})
++        profiles.append(
++            ReadingProfile(
++                word=word,
++                pos=pos,
++                reading_id=reading_id,
++                ipa=ipa_values[0],
++                sense_ids=legacy_evidence["sense_ids"],
++                cues=cues,
++            )
++        )
++
++    return AmbiguityIndex(language=language, locale=locale, profiles=tuple(profiles))
+
+
+ def save_index(index: AmbiguityIndex, path: str | Path) -> Path:
+     destination = Path(path)
+     destination.parent.mkdir(parents=True, exist_ok=True)
+     temporary = destination.with_name(destination.name + ".tmp")
++    payload = encode_v2(index)
+     temporary.write_text(
+-        json.dumps(index.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
++        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+         encoding="utf-8",
+     )
+     temporary.replace(destination)
+@@ -25,4 +134,11 @@ def load_index(path: str | Path) -> AmbiguityIndex:
+     value = json.loads(source.read_text(encoding="utf-8"))
+     if not isinstance(value, dict):
+         raise ValueError("ambiguity index root must be a JSON object")
+-    return AmbiguityIndex.from_dict(value)
++    version = value.get("schema_version")
++    if isinstance(version, bool) or not isinstance(version, int):
++        raise ValueError("schema_version must be an integer")
++    if version == 1:
++        return decode_v1(value)
++    if version == INDEX_SCHEMA_VERSION:
++        return decode_v2(value)
++    raise ValueError(f"unsupported ambiguity index schema {version}")
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index df66c59..e48ca0c 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -4,6 +4,7 @@ import sys
+
+ import pytest
+
++from pronresolve import discover_ambiguities, save_index
+ from pronresolve.cli import main
+
+
+@@ -38,14 +39,123 @@ def test_build_inspect_validate_cli(tmp_path, capsys):
+         ["build", "--input-jsonl", str(source), "--output", str(index_path), "--language", "en"],
+     )
+     assert status == 0
+-    summary = json.loads(output.out)
+-    assert summary["resolvable_keys"] == 1
++    assert json.loads(output.out)["schema_version"] == 2
++    assert json.loads(output.out)["resolvable_keys"] == 1
+     assert index_path.exists()
++    assert json.loads(index_path.read_text(encoding="utf-8"))["schema_version"] == 2
+     report = tmp_path / "index.json.report.json"
+     assert json.loads(report.read_text(encoding="utf-8"))["entries_scanned"] == 2
++
+     assert main(["inspect", str(index_path)]) == 0
+-    assert json.loads(capsys.readouterr().out)["valid"] is True
++    summary = json.loads(capsys.readouterr().out)
++    assert summary["valid"] is True
++    assert summary["ambiguous_word_count"] == 1
++    assert summary["word_pos_group_count"] == 1
++    assert summary["profile_count"] == 2
++    assert summary["cue_count"] == 2
++    assert summary["average_cues_per_profile"] == 1.0
++
++    assert main(["inspect", str(index_path), "--word", "LEAD"]) == 0
++    details = json.loads(capsys.readouterr().out)
++    assert details["word"] == "lead"
++    assert len(details["readings"]) == 2
++    assert {reading["pos"] for reading in details["readings"]} == {"NOUN"}
++    assert {reading["ipa"] for reading in details["readings"]} == {"liːd", "lɛd"}
++    assert all(reading["sense_ids"] for reading in details["readings"])
++    assert all(reading["weighted_cues"] for reading in details["readings"])
++
+     assert main(["validate", str(index_path)]) == 0
++    assert json.loads(capsys.readouterr().out)["schema_version"] == 2
++
++
++def test_validate_and_inspect_accept_v1_and_show_policy_b_runtime(tmp_path, capsys):
++    legacy = {
++        "schema_version": 1,
++        "language": "en",
++        "locale": "en-US",
++        "profiles": [
++            {
++                "word": "read",
++                "pos": "VERB",
++                "reading_id": "r1",
++                "ipa": ["ɹiːd"],
++                "sense_ids": ["s1"],
++                "glosses": ["comprehend"],
++                "examples": ["exampleonlycue"],
++                "synonyms": ["interpret"],
++            },
++            {
++                "word": "read",
++                "pos": "VERB",
++                "reading_id": "r2",
++                "ipa": ["ɹɛd"],
++                "sense_ids": ["s2"],
++                "glosses": ["past"],
++            },
++        ],
++    }
++    path = tmp_path / "legacy.json"
++    path.write_text(json.dumps(legacy), encoding="utf-8")
++
++    assert main(["validate", str(path)]) == 0
++    summary = json.loads(capsys.readouterr().out)
++    assert summary["schema_version"] == 1
++    assert summary["runtime_schema_version"] == 2
++
++    assert main(["inspect", str(path), "--word", "read"]) == 0
++    details = json.loads(capsys.readouterr().out)
++    assert details["schema_version"] == 1
++    assert details["runtime_schema_version"] == 2
++    cues = [
++        token
++        for reading in details["readings"]
++        for tokens in reading["weighted_cues"].values()
++        for token in tokens
++    ]
++    assert "comprehend" in cues
++    assert "interpret" in cues
++    assert "exampleonlycue" not in cues
++
++
++def test_policy_b_v2_serialization_is_at_most_half_equivalent_v1_pretty_fixture(tmp_path):
++    examples = [f"Example {number}: " + "incidentalword " * 10 for number in range(20)]
++    rows = [_entry("liːd", "metal"), _entry("lɛd", "guide")]
++    for row in rows:
++        row["senses"][0]["examples"] = examples
++    index = discover_ambiguities(rows, language="en", locale="en-US").index
++    sense_by_id = {row["senses"][0]["sense_id"]: row["senses"][0] for row in rows}
++    legacy_profiles = []
++    for profile in index.profiles:
++        sense = sense_by_id[profile.sense_ids[0]]
++        legacy_profiles.append(
++            {
++                "word": profile.word,
++                "pos": profile.pos,
++                "reading_id": profile.reading_id,
++                "ipa": [profile.ipa],
++                "sense_ids": list(profile.sense_ids),
++                "etymology_numbers": ["1"],
++                "glosses": sense["glosses"],
++                "topics": [],
++                "tags": [],
++                "examples": sense["examples"],
++                "synonyms": [],
++                "antonyms": [],
++            }
++        )
++    legacy_pretty = json.dumps(
++        {
++            "schema_version": 1,
++            "language": "en",
++            "locale": "en-US",
++            "profiles": legacy_profiles,
++        },
++        ensure_ascii=False,
++        indent=2,
++        sort_keys=True,
++    ).encode("utf-8")
++    v2_path = save_index(index, tmp_path / "compact.json")
++    assert v2_path.stat().st_size <= 0.5 * len(legacy_pretty)
+
+
+ @pytest.mark.parametrize(
+diff --git a/tests/test_compilation.py b/tests/test_compilation.py
+new file mode 100644
+index 0000000..b0e0e63
+--- /dev/null
++++ b/tests/test_compilation.py
+@@ -0,0 +1,97 @@
++import pytest
++
++from pronresolve.compile import EVIDENCE_WEIGHTS, compile_cues
++from pronresolve.models import Cue, ReadingProfile
++
++
++def cue_map(cues):
++    return {cue.token: cue.weight for cue in cues}
++
++
++def test_policy_b_weights_are_canonical_and_examples_are_not_a_scoring_field():
++    assert EVIDENCE_WEIGHTS == {
++        "synonyms": 3.5,
++        "glosses": 3.0,
++        "topics": 2.5,
++        "tags": 1.0,
++        "antonyms": 0.75,
++    }
++    assert "examples" not in EVIDENCE_WEIGHTS
++
++
++def test_compiler_assigns_each_policy_b_weight_and_discards_stopwords():
++    cues = compile_cues(
++        {
++            "synonyms": ["synonymword"],
++            "glosses": ["glossword"],
++            "topics": ["topicword"],
++            "tags": ["tagword"],
++            "antonyms": ["antonymword"],
++        }
++    )
++    assert cue_map(cues) == {
++        "synonymword": 3.5,
++        "glossword": 3.0,
++        "topicword": 2.5,
++        "tagword": 1.0,
++        "antonymword": 0.75,
++    }
++    assert "the" not in cue_map(compile_cues({"glosses": ["the instrument"]}))
++
++
++def test_compiler_ignores_examples_and_uses_maximum_duplicate_weight():
++    cues = compile_cues(
++        {
++            "examples": ["exampleonlycue sharedcue"],
++            "glosses": ["glosscue sharedcue"],
++            "synonyms": ["synonymcue sharedcue"],
++        }
++    )
++    assert cue_map(cues) == {
++        "glosscue": 3.0,
++        "sharedcue": 3.5,
++        "synonymcue": 3.5,
++    }
++    assert "exampleonlycue" not in cue_map(cues)
++
++
++def test_compiler_is_independent_of_field_order_and_unicode_composition():
++    first = compile_cues(
++        {
++            "glosses": ["Cafe\u0301 instrument"],
++            "synonyms": ["instrument café"],
++            "tags": ["useful"],
++        }
++    )
++    second = compile_cues(
++        {
++            "tags": ["useful"],
++            "synonyms": ["café instrument"],
++            "glosses": ["café instrument"],
++        }
++    )
++    assert first == second
++    assert [cue.token for cue in first] == sorted(cue.token for cue in first)
++    assert cue_map(first)["café"] == 3.5
++
++
++def test_runtime_profile_is_lean_scalar_and_has_unique_ordered_cues():
++    profile = ReadingProfile(
++        word="Read",
++        pos="verb",
++        reading_id="r1",
++        ipa="/ɹɛd/",
++        sense_ids=("sense-b", "sense-a"),
++        cues=(Cue("zebra", 1), Cue("alpha", 3)),
++    )
++    assert profile.word == "read"
++    assert profile.pos == "VERB"
++    assert profile.ipa == "ɹɛd"
++    assert profile.sense_ids == ("sense-a", "sense-b")
++    assert [cue.token for cue in profile.cues] == ["alpha", "zebra"]
++    assert set(profile.to_dict()) == {"id", "ipa", "sense_ids", "cues"}
++    with pytest.raises(ValueError, match="duplicate tokens"):
++        ReadingProfile("read", "VERB", "r2", "ɹɛd", cues=(Cue("word", 1), Cue("WORD", 3)))
++
++    with pytest.raises(ValueError, match="not defined by the Policy B"):
++        Cue("unknown", 4.0)
+diff --git a/tests/test_discovery.py b/tests/test_discovery.py
+index fdc2ec5..8cb1cc8 100644
+--- a/tests/test_discovery.py
++++ b/tests/test_discovery.py
+@@ -34,10 +34,29 @@ def test_discovers_different_ipa_for_same_word_and_pos():
+     assert len(result.index.profiles) == 2
+     assert result.report.resolvable_keys == 1
+     assert result.report.unlinked_ambiguity_keys == 0
+-    assert {profile.ipa[0] for profile in result.index.profiles} == {"wʌg", "wuːg"}
++    assert {profile.ipa for profile in result.index.profiles} == {"wʌg", "wuːg"}
+     assert {profile.word.casefold() for profile in result.index.profiles} == {"wug"}
+
+
++def test_discovery_compiles_cues_without_examples_or_raw_runtime_evidence():
++    rows = [
++        entry("lead", "verb", "liːd", "to guide", "guide"),
++        entry("lead", "verb", "lɛd", "a metallic element", "metal"),
++    ]
++    rows[0]["senses"][0]["examples"] = ["quizzicalexamplecue"]
++    result = discover_ambiguities(rows, language="en")
++
++    profiles = result.index.profiles
++    assert len(profiles) == 2
++    assert all(profile.ipa in {"liːd", "lɛd"} for profile in profiles)
++    assert all(not hasattr(profile, "examples") for profile in profiles)
++    assert all(not hasattr(profile, "glosses") for profile in profiles)
++    assert all("quizzicalexamplecue" not in {cue.token for cue in p.cues} for p in profiles)
++    assert all(profile.sense_ids for profile in profiles)
++    for candidates in result.index.to_dict()["entries"]["lead"]["VERB"]:
++        assert set(candidates) == {"id", "ipa", "sense_ids", "cues"}
++
++
+ def test_same_entry_with_two_ipa_is_reported_but_not_guessed():
+     result = discover_ambiguities(
+         [
+diff --git a/tests/test_models.py b/tests/test_models.py
+index 7f6f05d..419310a 100644
+--- a/tests/test_models.py
++++ b/tests/test_models.py
+@@ -1,72 +1,57 @@
+-import json
+-
+ import pytest
+
+ from pronresolve.models import AmbiguityIndex
+-from pronresolve.storage import load_index
++from pronresolve.storage import decode_v2, encode_v2
+
+
+ def valid_index():
+     return {
+-        "schema_version": 1,
++        "schema_version": 2,
+         "language": "en",
+         "locale": None,
+-        "profiles": [
+-            {
+-                "word": "x",
+-                "pos": "NOUN",
+-                "reading_id": "r1",
+-                "ipa": ["ɛks"],
+-                "glosses": ["letter"],
++        "entries": {
++            "read": {
++                "VERB": [
++                    {
++                        "id": "r1",
++                        "ipa": "ɹiːd",
++                        "sense_ids": ["sense-read"],
++                        "cues": {"3.5": ["interpret"], "3": ["comprehend"]},
++                    },
++                    {
++                        "id": "r2",
++                        "ipa": "ɹɛd",
++                        "sense_ids": ["sense-past"],
++                        "cues": {"3": ["past"]},
++                    },
++                ]
+             }
+-        ],
++        },
+     }
+
+
+-@pytest.mark.parametrize(
+-    "mutate, message",
+-    [
+-        (
+-            lambda value: value["profiles"].__setitem__(0, 123),
+-            r"profiles\[0\] must be a JSON object",
+-        ),
+-        (
+-            lambda value: value["profiles"][0].pop("reading_id"),
+-            r"profiles\[0\].reading_id is required",
+-        ),
+-        (
+-            lambda value: value["profiles"][0].update(ipa=[]),
+-            r"profiles\[0\].ipa must be a non-empty array",
+-        ),
+-        (
+-            lambda value: value["profiles"][0].update(ipa=[1]),
+-            r"profiles\[0\].ipa must be an array of strings",
+-        ),
+-        (
+-            lambda value: value["profiles"][0].update(tags="noun"),
+-            r"profiles\[0\].tags must be an array of strings",
+-        ),
+-        (lambda value: value.update(language=""), r"index.language must be a non-empty string"),
+-    ],
+-)
+-def test_index_rejects_malformed_schema(mutate, message):
++def test_index_round_trips_schema_two_as_grouped_candidates():
+     value = valid_index()
+-    mutate(value)
+-    with pytest.raises(ValueError, match=message):
+-        AmbiguityIndex.from_dict(value)
++    index = decode_v2(value)
++    encoded = encode_v2(index)
++    assert encoded == value
++    assert AmbiguityIndex.from_dict(value) == index
++    assert list(encoded["entries"]) == ["read"]
++    assert list(encoded["entries"]["read"]) == ["VERB"]
+
+
+-def test_index_round_trips_schema_one():
+-    value = valid_index()
+-    index = AmbiguityIndex.from_dict(value)
+-    assert AmbiguityIndex.from_dict(index.to_dict()) == index
++def test_index_rejects_bad_root_and_schema_version():
++    with pytest.raises(ValueError, match="root must be a JSON object"):
++        AmbiguityIndex.from_dict([])
++    for version in ("2", 2.0, True, None, 99):
++        value = valid_index()
++        value["schema_version"] = version
++        with pytest.raises(ValueError, match="schema_version|unsupported"):
++            AmbiguityIndex.from_dict(value)
+
+
+-@pytest.mark.parametrize("version", ["1", 1.0, True, None])
+-def test_load_index_rejects_invalid_schema_version_type(tmp_path, version):
++def test_runtime_model_rejects_non_scalar_ipa_and_duplicate_cues():
+     value = valid_index()
+-    value["schema_version"] = version
+-    path = tmp_path / "bad.json"
+-    path.write_text(json.dumps(value), encoding="utf-8")
+-    with pytest.raises(ValueError, match="schema_version must be an integer"):
+-        load_index(path)
++    value["entries"]["read"]["VERB"][0]["ipa"] = ["ɹiːd"]
++    with pytest.raises(ValueError, match="ipa must be a non-empty string"):
++        AmbiguityIndex.from_dict(value)
+diff --git a/tests/test_resolver.py b/tests/test_resolver.py
+index 6eadaa5..f445cab 100644
+--- a/tests/test_resolver.py
++++ b/tests/test_resolver.py
+@@ -1,14 +1,17 @@
+-from pronresolve import AmbiguityIndex, ReadingProfile, Resolver
++from pronresolve import AmbiguityIndex, Resolver
++from pronresolve.models import Cue, ReadingProfile
++from pronresolve.normalization import STOPWORDS, normalize_word, token_spans
++from pronresolve.storage import decode_v1
+
+
+-def profile(ipa, gloss, reading_id):
++def profile(ipa, cues, reading_id, *, pos="NOUN"):
+     return ReadingProfile(
+         word="wug",
+-        pos="NOUN",
++        pos=pos,
+         reading_id=reading_id,
+-        ipa=(ipa,),
++        ipa=ipa,
+         sense_ids=(f"sense-{reading_id}",),
+-        glosses=(gloss,),
++        cues=tuple(Cue(token, weight) for token, weight in cues.items()),
+     )
+
+
+@@ -18,17 +21,18 @@ def make_resolver():
+             language="en",
+             locale="en-US",
+             profiles=(
+-                profile("wʌg", "a small bird used in an aviary", "bird"),
+-                profile("wuːg", "a bend or curve in a road", "bend"),
++                profile("wʌg", {"aviary": 3.0}, "bird"),
++                profile("wuːg", {"road": 3.0}, "bend"),
+             ),
+         )
+     )
+
+
+-def test_context_selects_reading_with_matching_gloss_evidence():
++def test_context_selects_reading_with_precompiled_cues_and_matched_terms():
+     text = "The wug flew into the aviary."
+     start = text.index("wug")
+-    result = make_resolver().resolve(
++    resolver = make_resolver()
++    result = resolver.resolve(
+         text,
+         start=start,
+         end=start + len("wug"),
+@@ -38,9 +42,11 @@ def test_context_selects_reading_with_matching_gloss_evidence():
+
+     assert result is not None
+     assert result.reading_id == "bird"
+-    assert result.ipa == ("wʌg",)
++    assert result.ipa == "wʌg"
+     assert result.selector == "READING:bird"
+-    assert "aviary" in result.evidence_terms
++    assert result.sense_ids == ("sense-bird",)
++    assert result.evidence_terms == ("aviary",)
++    assert resolver._cue_maps["bird"] == {"aviary": 3.0}
+
+
+ def test_weak_or_missing_context_returns_none():
+@@ -61,35 +67,23 @@ def test_missing_pos_with_multiple_pos_groups_returns_none():
+         language="en",
+         locale=None,
+         profiles=(
+-            profile("wʌg", "a small bird", "noun-a"),
+-            profile("wuːg", "a bend in a road", "noun-b"),
+-            ReadingProfile(
+-                word="wug",
+-                pos="VERB",
+-                reading_id="verb-a",
+-                ipa=("wʌg",),
+-                glosses=("to move quickly",),
+-            ),
+-            ReadingProfile(
+-                word="wug",
+-                pos="VERB",
+-                reading_id="verb-b",
+-                ipa=("wuːg",),
+-                glosses=("to curve around",),
+-            ),
++            profile("wʌg", {"aviary": 3.0}, "noun-a"),
++            profile("wuːg", {"road": 3.0}, "noun-b"),
++            profile("wʌg", {"quickly": 3.0}, "verb-a", pos="VERB"),
++            profile("wuːg", {"curve": 3.0}, "verb-b", pos="VERB"),
+         ),
+     )
+     text = "The wug flew into the aviary."
+-    start = text.index("wug")
+-    assert Resolver(index).resolve(text, start=start, end=start + 3, lemma="wug") is None
++    assert Resolver(index).resolve(text, start=4, end=7, lemma="wug") is None
+
+
+ def test_bad_offsets_return_none():
+     text = "The wug flew."
+     assert make_resolver().resolve(text, start=-1, end=2, lemma="wug") is None
++    assert make_resolver().resolve(text, start=5, end=4, lemma="wug") is None
+
+
+-def test_thresholds_ties_unknown_and_weak_context_abstain():
++def test_thresholds_ties_unknown_words_and_wrong_pos_abstain():
+     resolver = make_resolver()
+     text = "The wug flew into the aviary."
+     start = text.index("wug")
+@@ -98,62 +92,65 @@ def test_thresholds_ties_unknown_and_weak_context_abstain():
+     assert Resolver(resolver.index, min_margin=100).resolve(text, **args) is None
+     assert resolver.resolve("The wug is here.", start=4, end=7, pos="NOUN", lemma="wug") is None
+     assert resolver.resolve("The unknown flew into the aviary.", start=4, end=11) is None
++    assert resolver.resolve("wug aviary", start=0, end=3, pos="ADJ", lemma="wug") is None
+
+
+-def test_tied_candidates_abstain_and_three_candidates_are_supported():
+-    index = make_resolver().index
++def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
+     tied = AmbiguityIndex(
+         language="en",
+         locale=None,
+         profiles=(
+-            profile("a", "shared aviary", "a"),
+-            profile("b", "shared aviary", "b"),
++            profile("a", {"shared": 3.0}, "a"),
++            profile("b", {"shared": 3.0}, "b"),
+         ),
+     )
+     assert Resolver(tied).resolve("wug shared", start=0, end=3, pos="NOUN", lemma="wug") is None
+-    three = AmbiguityIndex(
+-        language=index.language,
+-        locale=index.locale,
+-        profiles=(*index.profiles, profile("wʊg", "a nest", "nest")),
+-    )
+-    assert (
+-        Resolver(three).resolve("wug aviary", start=0, end=3, pos="NOUN", lemma="wug") is not None
+-    )
+
++    single = AmbiguityIndex(
++        language="en",
++        locale=None,
++        profiles=(profile("a", {"shared": 3.0}, "only"),),
++    )
++    assert Resolver(single).resolve("wug shared", start=0, end=3, pos="NOUN", lemma="wug") is None
+
+-def test_pos_filter_and_unicode_casefold_resolution():
+-    resolver = make_resolver()
+-    assert resolver.resolve("wug aviary", start=0, end=3, pos="ADJ", lemma="wug") is None
+-    assert (
+-        resolver.resolve("WUG AVIARY", start=0, end=3, pos="noun", lemma="WUG").reading_id == "bird"
++    three = AmbiguityIndex(
++        language="en",
++        locale=None,
++        profiles=(
++            profile("a", {"aviary": 3.0}, "a"),
++            profile("b", {"road": 3.0}, "b"),
++            profile("c", {"nest": 3.0}, "nest"),
++        ),
+     )
++    result = Resolver(three).resolve("wug aviary", start=0, end=3, pos="NOUN", lemma="wug")
++    assert result is not None
+
+
+-def test_resolve_token_mapping_and_spacy_like_object():
++def test_pos_filter_unicode_casefold_and_token_adapter():
+     resolver = make_resolver()
+-    text = "The wug flew into the aviary."
+-    start = text.index("wug")
+-    mapping = {"start_char": start, "text": "wug", "pos": "NOUN", "lemma": "wug"}
+-    assert resolver.resolve_token(text, mapping).reading_id == "bird"
++    result = resolver.resolve("WUG AVIARY", start=0, end=3, pos="noun", lemma="WUG")
++    assert result is not None and result.reading_id == "bird"
++
++    mapping = {"start_char": 4, "text": "wug", "pos": "NOUN", "lemma": "wug"}
++    assert resolver.resolve_token("The wug flew into the aviary.", mapping).reading_id == "bird"
+
+     class Token:
+         pass
+
+-    Token.idx = start
++    Token.idx = 4
+     Token.text = "wug"
+     Token.lemma_ = "wug"
+     Token.pos_ = "NOUN"
++    assert resolver.resolve_token("The wug flew into the aviary.", Token()).reading_id == "bird"
+
+-    assert resolver.resolve_token(text, Token()).reading_id == "bird"
+
+-
+-def test_equal_score_candidates_are_ordered_by_reading_id():
++def test_equal_scores_are_ordered_by_reading_id_and_report_matched_cues():
+     tied = AmbiguityIndex(
+         language="en",
+         locale=None,
+         profiles=(
+-            profile("a", "shared aviary", "z-reading"),
+-            profile("b", "shared aviary", "a-reading"),
++            profile("a", {"shared": 3.0}, "z-reading"),
++            profile("b", {"shared": 3.0}, "a-reading"),
+         ),
+     )
+     result = Resolver(tied, min_margin=0).resolve(
+@@ -162,25 +159,85 @@ def test_equal_score_candidates_are_ordered_by_reading_id():
+     assert result is not None
+     assert [candidate.reading_id for candidate in result.candidates] == ["a-reading", "z-reading"]
+     assert result.reading_id == "a-reading"
++    assert result.evidence_terms == ("shared",)
+
+
+-def test_context_evidence_in_multiple_fields_counts_once_at_strongest_weight():
+-    base = profile("a", "aviary", "a")
+-    enriched = ReadingProfile(
+-        word=base.word,
+-        pos=base.pos,
+-        reading_id=base.reading_id,
+-        ipa=base.ipa,
+-        glosses=base.glosses,
+-        synonyms=("aviary",),
++def test_example_only_context_has_no_compiled_score():
++    index = AmbiguityIndex(
++        language="en",
++        locale=None,
++        profiles=(
++            profile("a", {"aviary": 3.0}, "a"),
++            profile("b", {"road": 3.0}, "b"),
++        ),
+     )
+-    other = profile("b", "road", "b")
+-    plain = Resolver(AmbiguityIndex("en", None, (base, other))).resolve(
+-        "wug aviary", start=0, end=3, pos="NOUN", lemma="wug"
++    text = "wug quizzicalexamplecue"
++    assert Resolver(index).resolve(text, start=0, end=3, pos="NOUN", lemma="wug") is None
++
++
++def _policy_b_reference_score(profile, text, start, end):
++    spans = token_spans(text)
++    target_word = normalize_word(text[start:end])
++    target_index = next(
++        (index for index, span in enumerate(spans) if span.start < end and span.end > start),
++        sum(1 for span in spans if span.end <= start),
+     )
+-    rich = Resolver(AmbiguityIndex("en", None, (enriched, other))).resolve(
+-        "wug aviary", start=0, end=3, pos="NOUN", lemma="wug"
++    nearest = {}
++    for index, span in enumerate(spans):
++        if span.start < end and span.end > start:
++            continue
++        if span.normalized in STOPWORDS or span.normalized == target_word:
++            continue
++        distance = abs(index - target_index)
++        nearest[span.normalized] = min(nearest.get(span.normalized, distance), distance)
++    cue_weights = {cue.token: cue.weight for cue in profile.cues}
++    score = sum(
++        cue_weights.get(token, 0.0) / (1.0 + 0.15 * max(distance - 1, 0))
++        for token, distance in nearest.items()
+     )
+-    assert plain is not None and rich is not None
+-    assert rich.score > plain.score
+-    assert rich.score < plain.score * 2
++    return round(score, 6)
++
++
++def test_v1_resolution_scores_match_policy_b_reference_not_legacy_examples():
++    legacy = {
++        "schema_version": 1,
++        "language": "en",
++        "locale": None,
++        "profiles": [
++            {
++                "word": "read",
++                "pos": "VERB",
++                "reading_id": "read-cue",
++                "ipa": ["ɹiːd"],
++                "sense_ids": ["s1"],
++                "synonyms": ["interpret"],
++                "glosses": ["comprehend"],
++                "topics": ["communication"],
++                "tags": ["transitive"],
++                "antonyms": ["ignore"],
++                "examples": ["exampleonlycue"],
++            },
++            {
++                "word": "read",
++                "pos": "VERB",
++                "reading_id": "read-other",
++                "ipa": ["ɹɛd"],
++                "sense_ids": ["s2"],
++                "glosses": ["unrelated"],
++            },
++        ],
++    }
++    index = decode_v1(legacy)
++    resolver = Resolver(index, min_score=0, min_margin=0)
++    text = "read interpret comprehend communication transitive ignore exampleonlycue"
++    result = resolver.resolve(text, start=0, end=4, pos="VERB", lemma="read")
++
++    assert result is not None
++    expected = {
++        profile.reading_id: _policy_b_reference_score(profile, text, 0, 4)
++        for profile in index.profiles
++    }
++    actual = {candidate.reading_id: candidate.score for candidate in result.candidates}
++    assert actual == expected
++    assert result.reading_id == "read-cue"
++    assert "exampleonlycue" not in result.evidence_terms
+diff --git a/tests/test_schema_v2.py b/tests/test_schema_v2.py
+new file mode 100644
+index 0000000..099af95
+--- /dev/null
++++ b/tests/test_schema_v2.py
+@@ -0,0 +1,147 @@
++import pytest
++
++from pronresolve.models import AmbiguityIndex, ReadingProfile
++from pronresolve.storage import decode_v2, encode_v2
++
++
++def valid_v2():
++    return {
++        "schema_version": 2,
++        "language": "en",
++        "locale": "en-US",
++        "entries": {
++            "read": {
++                "VERB": [
++                    {
++                        "id": "r1",
++                        "ipa": "ɹiːd",
++                        "sense_ids": ["s1"],
++                        "cues": {"3.5": ["interpret"], "3": ["comprehend"]},
++                    },
++                    {"id": "r2", "ipa": "ɹɛd", "sense_ids": [], "cues": {}},
++                ]
++            }
++        },
++    }
++
++
++def _set_language(value):
++    value["language"] = " "
++
++
++def _set_locale(value):
++    value["locale"] = 3
++
++
++def _set_entries(value):
++    value["entries"] = []
++
++
++def _set_empty_word(value):
++    value["entries"] = {" ": {"VERB": []}}
++
++
++def _set_empty_pos(value):
++    value["entries"]["read"] = {" ": []}
++
++
++def _set_single_candidate(value):
++    value["entries"]["read"]["VERB"].pop()
++
++
++def _duplicate_id(value):
++    value["entries"]["read"]["VERB"][1]["id"] = "r1"
++
++
++def _empty_id(value):
++    value["entries"]["read"]["VERB"][0]["id"] = " "
++
++
++def _empty_ipa(value):
++    value["entries"]["read"]["VERB"][0]["ipa"] = " "
++
++
++def _non_array_sense_ids(value):
++    value["entries"]["read"]["VERB"][0]["sense_ids"] = "s1"
++
++
++def _bad_weight(value):
++    value["entries"]["read"]["VERB"][0]["cues"] = {"not-a-weight": ["token"]}
++
++
++def _unknown_weight(value):
++    value["entries"]["read"]["VERB"][0]["cues"] = {"99": ["token"]}
++
++
++def _non_string_token(value):
++    value["entries"]["read"]["VERB"][0]["cues"] = {"3": [42]}
++
++
++def _empty_token(value):
++    value["entries"]["read"]["VERB"][0]["cues"] = {"3": [""]}
++
++
++def _duplicate_cue(value):
++    value["entries"]["read"]["VERB"][0]["cues"]["3.5"] = ["comprehend"]
++
++
++@pytest.mark.parametrize(
++    "mutate, message",
++    [
++        (_set_language, r"index.language must be a non-empty string"),
++        (_set_locale, r"index.locale must be a non-empty string or null"),
++        (_set_entries, r"index.entries must be a JSON object"),
++        (_set_empty_word, r"empty or invalid word key"),
++        (_set_empty_pos, r"empty POS key"),
++        (_set_single_candidate, r"at least two candidates"),
++        (_duplicate_id, r"duplicates reading ID"),
++        (_empty_id, r"\.id must be a non-empty string"),
++        (_empty_ipa, r"\.ipa must be a non-empty string"),
++        (_non_array_sense_ids, r"sense_ids must be an array of strings"),
++        (_bad_weight, r"numeric cue weight"),
++        (_unknown_weight, r"unsupported weight"),
++        (_non_string_token, r"non-string or empty token"),
++        (_empty_token, r"non-string or empty token"),
++        (_duplicate_cue, r"assigns token .* more than once"),
++    ],
++)
++def test_schema_v2_rejects_malformed_payloads(mutate, message):
++    value = valid_v2()
++    mutate(value)
++    with pytest.raises(ValueError, match=message):
++        decode_v2(value)
++
++
++def test_schema_v2_normalizes_loaded_data_to_canonical_internal_form():
++    value = valid_v2()
++    value["entries"] = {
++        "Read": {
++            "verb": [
++                {
++                    "id": "r1",
++                    "ipa": "/ɹiːd/",
++                    "sense_ids": ["s2", "s1"],
++                    "cues": {"3.0": ["Comprehend"]},
++                },
++                {"id": "r2", "ipa": "ɹɛd", "sense_ids": [], "cues": {}},
++            ]
++        }
++    }
++    index = decode_v2(value)
++    profile = index.profiles[0]
++    assert profile.word == "read"
++    assert profile.pos == "VERB"
++    assert profile.ipa == "ɹiːd"
++    assert profile.sense_ids == ("s1", "s2")
++    assert profile.cues[0].token == "comprehend"
++    assert encode_v2(index)["entries"].keys() == {"read"}
++
++
++def test_encoder_rejects_an_emitted_group_with_fewer_than_two_candidates():
++    index = AmbiguityIndex(
++        language="en",
++        locale=None,
++        profiles=(ReadingProfile("read", "VERB", "r1", "ɹiːd"),),
++    )
++    with pytest.raises(ValueError, match="at least two candidates"):
++        encode_v2(index)
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+index df40b7e..0eacb47 100644
+--- a/tests/test_storage.py
++++ b/tests/test_storage.py
+@@ -2,10 +2,28 @@ import json
+
+ import pytest
+
+-from pronresolve import AmbiguityIndex, ReadingProfile, Resolver, load_index, save_index
++from pronresolve.models import AmbiguityIndex, Cue, ReadingProfile
++from pronresolve.storage import decode_v1, decode_v2, load_index, save_index
+
+
+-def test_index_round_trip_and_resolver_path(tmp_path):
++def _v1_profile(reading_id, ipa, **evidence):
++    return {
++        "word": "read",
++        "pos": "VERB",
++        "reading_id": reading_id,
++        "ipa": [ipa],
++        "sense_ids": [f"sense-{reading_id}"],
++        "etymology_numbers": ["1"],
++        "glosses": evidence.get("glosses", []),
++        "topics": evidence.get("topics", []),
++        "tags": evidence.get("tags", []),
++        "examples": evidence.get("examples", []),
++        "synonyms": evidence.get("synonyms", []),
++        "antonyms": evidence.get("antonyms", []),
++    }
++
++
++def test_index_round_trip_saves_compact_v2_and_resolver_path_loads_it(tmp_path):
+     index = AmbiguityIndex(
+         language="en",
+         locale="en-US",
+@@ -14,26 +32,79 @@ def test_index_round_trip_and_resolver_path(tmp_path):
+                 word="wug",
+                 pos="NOUN",
+                 reading_id="r1-en-example",
+-                ipa=("wʌg",),
+-                glosses=("a bird",),
++                ipa="wʌg",
++                cues=(Cue("bird", 3),),
+             ),
+             ReadingProfile(
+                 word="wug",
+                 pos="NOUN",
+                 reading_id="r1-en-example2",
+-                ipa=("wuːg",),
+-                glosses=("a bend",),
++                ipa="wuːg",
++                cues=(Cue("bend", 3),),
+             ),
+         ),
+     )
+-    path = save_index(index, tmp_path / "index.json")
++    path = save_index(index, tmp_path / "nested" / "index.json")
++    raw = path.read_text(encoding="utf-8")
+     loaded = load_index(path)
++    assert json.loads(raw)["schema_version"] == 2
++    assert "\n  " not in raw
+     assert loaded == index
+-    assert Resolver.from_path(path).index == index
++    assert decode_v2(json.loads(raw)) == index
++
++
++def test_v1_load_applies_policy_b_and_save_writes_v2(tmp_path):
++    value = {
++        "schema_version": 1,
++        "language": "en",
++        "locale": "en-US",
++        "profiles": [
++            _v1_profile(
++                "read-present",
++                "/ɹiːd/",
++                glosses=["comprehend text"],
++                synonyms=["interpret"],
++                topics=["communications"],
++                tags=["transitive"],
++                examples=["exampleonlycue"],
++                antonyms=["ignore"],
++            ),
++            _v1_profile("read-past", "[ɹɛd]", glosses=["past participle"]),
++        ],
++    }
++    index = decode_v1(value)
++    by_id = {profile.reading_id: profile for profile in index.profiles}
++    present = {cue.token: cue.weight for cue in by_id["read-present"].cues}
++    assert present["interpret"] == 3.5
++    assert present["comprehend"] == 3.0
++    assert present["communications"] == 2.5
++    assert present["transitive"] == 1.0
++    assert present["ignore"] == 0.75
++    assert "exampleonlycue" not in present
++    assert by_id["read-present"].ipa == "ɹiːd"
++    assert by_id["read-present"].sense_ids == ("sense-read-present",)
++    assert not hasattr(by_id["read-present"], "etymology_numbers")
++
++    source = tmp_path / "legacy.json"
++    source.write_text(json.dumps(value), encoding="utf-8")
++    assert load_index(source) == index
++    output = save_index(index, tmp_path / "new.json")
++    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
++
++
++def test_v1_rejects_multiple_distinct_ipa_values_in_one_runtime_profile():
++    value = {
++        "schema_version": 1,
++        "language": "en",
++        "locale": None,
++        "profiles": [_v1_profile("ambiguous", "ɹiːd", glosses=["x"]) | {"ipa": ["ɹiːd", "ɹɛd"]}],
++    }
++    with pytest.raises(ValueError, match="exactly one"):
++        decode_v1(value)
+
+
+ def test_unknown_schema_is_rejected(tmp_path):
+     path = tmp_path / "bad.json"
+-    path.write_text(json.dumps({"schema_version": 99, "profiles": []}), encoding="utf-8")
++    path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
+     with pytest.raises(ValueError, match="unsupported ambiguity index schema"):
+         load_index(path)

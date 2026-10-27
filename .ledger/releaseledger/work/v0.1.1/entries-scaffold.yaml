@@ -1,0 +1,40 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.1
+git_base_ref: 03ec09283807ee7354289b2141fbbe08019ef96b
+git_base_sha: 03ec09283807ee7354289b2141fbbe08019ef96b
+git_head_ref: 5471e6db76347e73d0759c45242cd6ebdef11b1f
+git_head_sha: 5471e6db76347e73d0759c45242cd6ebdef11b1f
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: ""
+    status: draft
+    source_refs:
+      - git:5471e6db76347e73d0759c45242cd6ebdef11b1f
+    paths:
+      - README.md
+      - docs/index.md
+      - pronresolve/__init__.py
+      - pronresolve/cli.py
+      - pronresolve/compile.py
+      - pronresolve/discovery.py
+      - pronresolve/models.py
+      - pronresolve/normalization.py
+      - pronresolve/resolver.py
+      - pronresolve/storage.py
+      - tests/test_cli.py
+      - tests/test_compilation.py
+      - tests/test_discovery.py
+      - tests/test_models.py
+      - tests/test_resolver.py
+      - tests/test_schema_v2.py
+      - tests/test_storage.py
+    sources:
+      - git:5471e6db76347e73d0759c45242cd6ebdef11b1f
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
