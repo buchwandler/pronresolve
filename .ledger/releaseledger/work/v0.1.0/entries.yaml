@@ -1,0 +1,60 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.0
+git_base_ref: fa29c0d03b307a8d564b66cf79d48d97aabeaa6c
+git_base_sha: fa29c0d03b307a8d564b66cf79d48d97aabeaa6c
+git_head_ref: 3743632dbd82c9cd302e63ee09a596e2267030d2
+git_head_sha: 3743632dbd82c9cd302e63ee09a596e2267030d2
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: "Added pronunciation discovery, JSON index storage, and context-based reading resolution with a CLI workflow"
+    status: accepted
+    source_refs:
+      - git:aa8c42f761925b60e4c31f75db41cb18cdf0cc34
+    paths:
+      - pronresolve/__init__.py
+      - pronresolve/cli.py
+      - pronresolve/discovery.py
+      - pronresolve/models.py
+      - pronresolve/normalization.py
+      - pronresolve/resolver.py
+      - pronresolve/storage.py
+      - pyproject.toml
+      - README.md
+      - tests/test_discovery.py
+      - tests/test_resolver.py
+      - tests/test_storage.py
+    sources:
+      - git:aa8c42f761925b60e4c31f75db41cb18cdf0cc34
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary: "Changed discovery and index output for determinism, added strict data validation, and expanded documentation"
+    status: accepted
+    source_refs:
+      - git:3743632dbd82c9cd302e63ee09a596e2267030d2
+    paths:
+      - pronresolve/discovery.py
+      - pronresolve/models.py
+      - pronresolve/cli.py
+      - pyproject.toml
+      - README.md
+      - docs/index.md
+      - docs/api.md
+      - docs/make.py
+      - tests/test_cli.py
+      - tests/test_discovery.py
+      - tests/test_models.py
+      - tests/test_normalization.py
+      - tests/test_resolver.py
+    sources:
+      - git:3743632dbd82c9cd302e63ee09a596e2267030d2
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

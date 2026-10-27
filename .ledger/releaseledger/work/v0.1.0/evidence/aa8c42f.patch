@@ -1,0 +1,2142 @@
+ .codecrate.toml                                 |  24 +++
+ .github/workflows/codecov.yml                   |  29 +++
+ .github/workflows/pre-commit.yml                |  26 +++
+ .github/workflows/python-publish.yml            |  83 ++++++++
+ .github/workflows/tests.yml                     |  43 +++++
+ .gitignore                                      |   2 +
+ .ledger/ledger.toml                             |  24 +++
+ .ledger/releaseledger/.ledger-project.toml      |   6 +
+ .ledger/releaseledger/config.toml               |  57 ++++++
+ .ledger/releaseledger/data/.ledger-project.toml |   6 +
+ .ledger/taskledger/.ledger-project.toml         |   6 +
+ .ledger/taskledger/config.toml                  |   7 +
+ .pre-commit-config.yaml                         |  64 +++++++
+ README.md                                       | 109 ++++++++++-
+ docs/Makefile                                   |  32 ++++
+ docs/conf.py                                    | 101 ++++++++++
+ docs/make.bat                                   | 113 +++++++++++
+ docs/make.py                                    |  89 +++++++++
+ docs/requirements.txt                           |   5 +
+ pronresolve/__init__.py                         |  33 ++++
+ pronresolve/__main__.py                         |   3 +
+ pronresolve/cli.py                              |  91 +++++++++
+ pronresolve/discovery.py                        | 242 ++++++++++++++++++++++++
+ pronresolve/models.py                           | 167 ++++++++++++++++
+ pronresolve/normalization.py                    |  63 ++++++
+ pronresolve/resolver.py                         | 201 ++++++++++++++++++++
+ pronresolve/storage.py                          |  28 +++
+ pyproject.toml                                  |  51 +++++
+ tests/test_discovery.py                         |  88 +++++++++
+ tests/test_resolver.py                          |  89 +++++++++
+ tests/test_storage.py                           |  39 ++++
+ 31 files changed, 1920 insertions(+), 1 deletion(-)
+
+diff --git a/.codecrate.toml b/.codecrate.toml
+new file mode 100644
+index 0000000..f698acb
+--- /dev/null
++++ b/.codecrate.toml
+@@ -0,0 +1,24 @@
++[codecrate]
++output = "context_pronresolve.md"
++keep_docstrings = true
++dedupe = true
++respect_gitignore = true
++exclude = ["*/.venv/*", "context_pronresolve.*"]
++include = [
++  "**/*.py",
++  "**/*.json",
++  "**/*.toml",
++  "**/*.rst",
++  "**/*.md",
++  "**/*.yaml",
++  "**/*.yml",
++  "**/py.typed",
++  "**/NOTICE",
++  "**/NOTICE.*",
++  "**/MANIFEST.in",
++  "LICENSE*",
++]
++split_max_chars = 2500000
++layout = "full"
++profile = "portable-agent"
++emit_standalone_unpacker = true
+diff --git a/.github/workflows/codecov.yml b/.github/workflows/codecov.yml
+new file mode 100644
+index 0000000..38b6db1
+--- /dev/null
++++ b/.github/workflows/codecov.yml
+@@ -0,0 +1,29 @@
++name: Coverage
++
++on:
++  push:
++  pull_request:
++
++permissions:
++  contents: read
++
++jobs:
++  run:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Setup Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++      - name: Install dependencies
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install -e ".[dev]" pytest-cov
++      - name: Generate coverage report
++        run: python -m pytest --cov=pronresolve --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=70
++      - name: Upload to Codecov
++        uses: codecov/codecov-action@v5
++        with:
++          token: ${{ secrets.CODECOV_TOKEN }}
++          files: ./coverage.xml
+diff --git a/.github/workflows/pre-commit.yml b/.github/workflows/pre-commit.yml
+new file mode 100644
+index 0000000..0e604e4
+--- /dev/null
++++ b/.github/workflows/pre-commit.yml
+@@ -0,0 +1,26 @@
++name: pre-commit
++
++on:
++  pull_request:
++  push:
++
++permissions:
++  contents: read
++
++jobs:
++  pre-commit:
++    runs-on: ubuntu-latest
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.13"
++
++      - name: Install Python tools
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install "ruff==0.16.0"
++
++      - uses: pre-commit/action@v3.0.1
+diff --git a/.github/workflows/python-publish.yml b/.github/workflows/python-publish.yml
+new file mode 100644
+index 0000000..49c4d4a
+--- /dev/null
++++ b/.github/workflows/python-publish.yml
+@@ -0,0 +1,83 @@
++# This workflow builds and publishes the Python package when a release is created.
++
++name: Upload Python Package
++
++on:
++  release:
++    types: [published]
++
++permissions:
++  contents: read
++
++jobs:
++  deploy:
++    runs-on: ubuntu-latest
++
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.x"
++      - name: Resolve expected release version
++        run: |
++          tag="${{ github.event.release.tag_name }}"
++          if [[ "$tag" == v* ]]; then
++            tag="${tag#v}"
++          fi
++          echo "EXPECTED_VERSION=$tag" >> "$GITHUB_ENV"
++      - name: Install build tools
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install -e ".[dev]" pytest-cov build twine
++      - name: Run the release quality gate
++        run: |
++          python -m pytest
++          python -X dev -W error::ResourceWarning -m pytest
++          python -m pytest \
++            --cov=pronresolve \
++            --cov-branch \
++            --cov-report=term-missing \
++            --cov-fail-under=70
++          python -m ruff check . --select E,F
++          python -m ruff format --check .
++          python -m mypy pronresolve
++      - name: Build and validate distributions
++        run: |
++          rm -rf dist build
++          python -m build
++          python -m twine check dist/*
++      - name: Smoke test wheel in a clean environment
++        run: |
++          smoke_dir="$RUNNER_TEMP/pronresolve-release-smoke"
++          mkdir -p "$smoke_dir"
++          cat > "$smoke_dir/entries.jsonl" <<'JSONL'
++          {"word":"lead","pos":"NOUN","pronunciations":[{"ipa":"liːd"}],"senses":[{"sense_id":"metal","glosses":["a heavy metal"]}]}
++          {"word":"lead","pos":"NOUN","pronunciations":[{"ipa":"lɛd"}],"senses":[{"sense_id":"guide","glosses":["to guide or direct"]}]}
++          JSONL
++          python -m venv .release-smoke
++          .release-smoke/bin/python -m pip install --upgrade pip
++          .release-smoke/bin/python -m pip install dist/*.whl
++          .release-smoke/bin/python - <<'PY'
++          import os
++          import pronresolve
++          expected = os.environ["EXPECTED_VERSION"]
++          actual = pronresolve.__version__
++          assert actual == expected and actual != "0+unknown", (expected, actual)
++          print(actual)
++          PY
++          .release-smoke/bin/pronresolve --help
++          .release-smoke/bin/pronresolve build \
++            --input-jsonl "$smoke_dir/entries.jsonl" \
++            --output "$smoke_dir/index.json" \
++            --language en \
++            --locale en-US
++          .release-smoke/bin/pronresolve inspect "$smoke_dir/index.json"
++          .release-smoke/bin/pronresolve validate "$smoke_dir/index.json"
++      - name: Publish package
++        uses: pypa/gh-action-pypi-publish@v1.13.0
++        with:
++          user: __token__
++          password: ${{ secrets.PYPI_API_TOKEN }}
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+new file mode 100644
+index 0000000..b6e7009
+--- /dev/null
++++ b/.github/workflows/tests.yml
+@@ -0,0 +1,43 @@
++name: Run tests
++
++on:
++  push:
++  pull_request:
++
++permissions:
++  contents: read
++
++jobs:
++  run:
++    runs-on: ${{ matrix.os }}
++    strategy:
++      matrix:
++        os: [ubuntu-latest, windows-latest, macos-latest]
++        python-version: ["3.10", "3.11", "3.12", "3.13"]
++    steps:
++      - uses: actions/checkout@v4
++      - name: Setup Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: ${{ matrix.python-version }}
++      - name: Install package and development tools
++        run: |
++          python -m pip install --upgrade pip
++          python -m pip install -e ".[dev]"
++      - name: Build distribution
++        run: python -m build
++      - name: Run tests
++        if: runner.os != 'Windows'
++        run: python -m pytest
++      - name: Run tests on Windows
++        if: runner.os == 'Windows'
++        timeout-minutes: 60
++        env:
++          PYTHONFAULTHANDLER: "1"
++        run: python -X faulthandler -m pytest -vv
++      - name: Run quality checks
++        if: runner.os == 'ubuntu-latest' && matrix.python-version == '3.10'
++        run: |
++          python -m ruff check . --select E,F
++          python -m ruff format --check .
++          python -m mypy pronresolve
+diff --git a/.gitignore b/.gitignore
+index 6f596e1..985a512 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -218,3 +218,5 @@ __marimo__/
+
+ # Streamlit
+ .streamlit/secrets.toml
++context_pronresolve*.*
++pronresolve/_version.py
+diff --git a/.ledger/ledger.toml b/.ledger/ledger.toml
+new file mode 100644
+index 0000000..7edb5d7
+--- /dev/null
++++ b/.ledger/ledger.toml
+@@ -0,0 +1,24 @@
++schema_version = 3
++
++[project]
++uuid = "5d5661be-4eac-4fde-8a0d-91bbb2098fdf"
++name = "pronresolve"
++
++[ledgers.taskledger.mounts.data]
++storage = "external"
++root = "../ledger"
++
++[ledgers.taskledger.mounts.runtime]
++storage = "user-data"
++
++[ledgers.taskledger.mounts.logs]
++storage = "user-data"
++
++[ledgers.taskledger.mounts.indexes]
++storage = "cache"
++
++[ledgers.releaseledger.mounts.data]
++storage = "project"
++
++[ledgers.releaseledger.mounts.indexes]
++storage = "cache"
+diff --git a/.ledger/releaseledger/.ledger-project.toml b/.ledger/releaseledger/.ledger-project.toml
+new file mode 100644
+index 0000000..ea4ce0a
+--- /dev/null
++++ b/.ledger/releaseledger/.ledger-project.toml
+@@ -0,0 +1,6 @@
++schema_version = 1
++layout_version = 3
++project_uuid = "5d5661be-4eac-4fde-8a0d-91bbb2098fdf"
++tool = "releaseledger"
++mount = "config"
++storage = "project"
+diff --git a/.ledger/releaseledger/config.toml b/.ledger/releaseledger/config.toml
+new file mode 100644
+index 0000000..b440614
+--- /dev/null
++++ b/.ledger/releaseledger/config.toml
+@@ -0,0 +1,57 @@
++config_version = 2
++# Branch-scoped release state. This block is safe to commit.
++ledger_ref = "main"
++ledger_parent_ref = ""
++ledger_branch_guard = "off"
++# Cross-ledger identity. Local record IDs stay unchanged.
++
++[ledger]
++code = "rl"
++# Release defaults.
++
++[release]
++default_changelog = "CHANGELOG.md"
++default_status = "planned"
++allow_dirty_worktree = true
++# Changelog build defaults.
++
++[changelog]
++output = "docs/changelog.md"
++header = ""
++body = """## {% if release.date %}[{{ release.version }}] - {{ release.date }}{% else %}[{{ release.version }}] - Unreleased{% endif %}
++
++{% for group in groups %}
++### {{ group.title }}
++{% for entry in group.entries %}
++- {% if entry.breaking %}**BREAKING:** {% endif %}{{ entry.summary }}
++{% endfor %}
++
++{% endfor %}
++"""
++footer = "<!-- generated by releaseledger -->"
++trim = true
++render_always = false
++postprocessors = []
++standard = ""
++group_mode = "extended"
++link_references = false
++repository_url = ""
++tag_prefix = "v"
++compare_url_template = ""
++release_url_template = ""
++preamble = ""
++semver = false
++unreleased = true
++# Git-first release evidence.
++
++[git]
++enabled = true
++tag_creation = "local"
++default_base = "previous_release_tag"
++default_head = "HEAD"
++previous_tag_patterns = ["v{version}", "{version}"]
++include_merges = "nontrivial"
++require_clean_worktree = false
++max_commits = 500
++max_diff_chars_per_commit = 12000
++candidate_status = "draft"
+diff --git a/.ledger/releaseledger/data/.ledger-project.toml b/.ledger/releaseledger/data/.ledger-project.toml
+new file mode 100644
+index 0000000..bf6f806
+--- /dev/null
++++ b/.ledger/releaseledger/data/.ledger-project.toml
+@@ -0,0 +1,6 @@
++schema_version = 1
++layout_version = 3
++project_uuid = "5d5661be-4eac-4fde-8a0d-91bbb2098fdf"
++tool = "releaseledger"
++mount = "data"
++storage = "project"
+diff --git a/.ledger/taskledger/.ledger-project.toml b/.ledger/taskledger/.ledger-project.toml
+new file mode 100644
+index 0000000..64472ab
+--- /dev/null
++++ b/.ledger/taskledger/.ledger-project.toml
+@@ -0,0 +1,6 @@
++schema_version = 1
++layout_version = 3
++project_uuid = "5d5661be-4eac-4fde-8a0d-91bbb2098fdf"
++tool = "taskledger"
++mount = "config"
++storage = "project"
+diff --git a/.ledger/taskledger/config.toml b/.ledger/taskledger/config.toml
+new file mode 100644
+index 0000000..6f94549
+--- /dev/null
++++ b/.ledger/taskledger/config.toml
+@@ -0,0 +1,7 @@
++# Project-local Taskledger configuration.
++# Storage topology belongs to Ledgercore; branch state belongs to data/state.toml.
++config_version = 3
++
++[ledger]
++code = 'tl'
++name = 'taskledger'
+diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+new file mode 100644
+index 0000000..1470944
+--- /dev/null
++++ b/.pre-commit-config.yaml
+@@ -0,0 +1,64 @@
++exclude: |
++  # NOT INSTALLABLE ADDONS
++  # END NOT INSTALLABLE ADDONS
++  # Files and folders generated by bots, to avoid loops
++  ^setup/|/static/description/index\.html$|
++  # We don't want to mess with tool-generated files
++  .svg$|/tests/([^/]+/)?cassettes/|^.copier-answers.yml$|^.github/|
++  # Maybe reactivate this when all README files include prettier ignore tags?
++  ^README\.md$|
++  # Repos using Sphinx to generate docs don't need prettying
++  ^docs/_templates/.*\.html$|
++  # Don't bother non-technical authors with formatting issues in docs
++  readme/.*\.(rst|md)$|
++  # Ignore build and dist directories in addons
++  /build/|/dist/|/dev/|/notebooks/
++  # You don't usually want a bot to modify your legal texts
++  (LICENSE.*|COPYING.*)|
++default_language_version:
++  python: python3
++repos:
++  - repo: local
++    hooks:
++      - id: ruff-check
++        name: ruff check
++        entry: ruff check --exit-non-zero-on-fix --force-exclude
++        language: system
++        types_or: [python, pyi]
++      - id: ruff-format
++        name: ruff format
++        entry: ruff format --force-exclude
++        language: system
++        types_or: [python, pyi]
++  - repo: https://github.com/asottile/pyupgrade
++    rev: v3.21.2
++    hooks:
++      - id: pyupgrade
++        args: [--py310-plus]
++  - repo: https://github.com/pre-commit/pre-commit-hooks
++    rev: v6.0.0
++    hooks:
++      - id: check-toml
++      - id: check-yaml
++      - id: end-of-file-fixer
++      - id: trailing-whitespace
++      - id: check-symlinks
++      - id: check-xml
++      - id: mixed-line-ending
++        args: ["--fix=lf"]
++      - id: debug-statements
++      - id: check-case-conflict
++      - id: check-docstring-first
++      - id: check-executables-have-shebangs
++      - id: check-merge-conflict
++  - repo: https://github.com/pre-commit/mirrors-prettier
++    rev: v4.0.0-alpha.8
++    hooks:
++      - id: prettier
++        name: prettier (with plugin-xml)
++        additional_dependencies:
++          - "prettier@2.7.1"
++          - "@prettier/plugin-xml@2.2.0"
++        args:
++          - --plugin=@prettier/plugin-xml
++        files: \.(css|htm|html|js|json|jsx|less|md|scss|toml|ts|xml|yaml|yml)$
+diff --git a/README.md b/README.md
+index 1965d2f..8dafa7b 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,108 @@
+-# pronresolve
+\ No newline at end of file
++# pronresolve MVP
++
++`pronresolve` discovers same-spelling, same-part-of-speech pronunciation ambiguity from dictionary data and chooses a reading from sentence context when the evidence is strong enough.
++
++The package is data-driven. It contains **no word-specific heteronym table** and has no runtime dependency on Lexhint, G2Lex, or Lexphon. The build pipeline supplies dictionary-entry objects; the runtime loads a generated JSON ambiguity index.
++
++## Package layout
++
++The Python package lives directly at `pronresolve/`. There is intentionally no `src/` directory.
++
++## Install
++
++```bash
++python -m pip install .
++```
++
++Versioning is VCS-driven through `setuptools-scm`. When installed from a source archive without Git metadata, the configured fallback version is `0.1.0.dev0`. Release builds should be made from version tags.
++
++For development:
++
++```bash
++python -m pip install -e ".[dev]"
++pytest
++```
++
++## Discover candidate readings from Lexhint entries
++
++The builder accepts Lexhint-style `DictionaryEntry` objects or dictionaries with the same fields. It deliberately accepts an iterable so a caller can stream entries instead of loading the full dictionary into memory.
++
++```python
++from pronresolve import discover_ambiguities, save_index
++
++# lexicon.iter_entries() is the proposed Lexhint streaming API described in
++# implementation-briefs/01_lexhint_entry_stream.md.
++result = discover_ambiguities(
++    lexicon.iter_entries(),
++    language="en",
++    locale="en-US",
++)
++save_index(result.index, "en-us.pronresolve.json")
++print(result.report.as_dict())
++```
++
++For a standalone smoke test, the CLI accepts JSONL records with `word`, `pos`, `pronunciations` (or `sounds`), `senses`, and optional `etymology_number` fields:
++
++```bash
++pronresolve build \
++  --input-jsonl dictionary-entries.jsonl \
++  --output en-us.pronresolve.json \
++  --language en \
++  --locale en-US
++pronresolve inspect en-us.pronresolve.json
++```
++
++## Runtime resolution
++
++The resolver needs the original sentence and the target token's character offsets. Supply POS and lemma when the frontend has them.
++
++```python
++from pronresolve import Resolver
++
++resolver = Resolver.from_path("en-us.pronresolve.json")
++decision = resolver.resolve(
++    text="The archer picked up the bow and an arrow.",
++    start=25,
++    end=28,
++    pos="NOUN",
++    lemma="bow",
++)
++
++if decision is not None:
++    selector = decision.selector  # e.g. "READING:r1-en-<stable-id>"
++    ipa = decision.ipa
++    print(selector, ipa, decision.score, decision.evidence_terms)
++```
++
++The selector is intended to be passed through an existing selector-aware lexicon lookup. If the resolver returns `None`, keep the current default/POS pronunciation path.
++
++## MVP discovery rules
++
++The discovery step groups entries by normalized spelling and POS.
++
++- One distinct IPA across entries: not ambiguous.
++- Multiple distinct IPA values attached to different entries, where each contributing entry has exactly one normalized IPA: resolvable candidate profiles are generated. The profile inherits that entry's sense evidence.
++- Multiple distinct IPA values on the same entry: classified as unlinked ambiguity and **not** turned into a context-resolution profile. The source does not tell us which sense belongs to which IPA, so the MVP refuses to guess.
++- Missing IPA: ignored for candidate generation and counted in the report.
++
++The MVP does not yet infer morphological lemmas, perform embedding-based similarity, or train a classifier. Context matching uses Unicode tokenization and weighted exact-token overlap across glosses, topics, tags, examples, synonyms, and antonyms. It is deterministic and explainable, not a claim of linguistic certainty.
++
++`locale` is stored as index metadata but the MVP does not apply locale-specific pronunciation filtering itself. Generate separate locale-specific indexes from correctly filtered source data when regional variants must be separated.
++
++## JSON index
++
++Schema version 1 contains:
++
++- `language`, `locale`, and `schema_version`
++- `profiles`: one profile per generated reading
++- stable reading IDs based on language, normalized word, normalized POS, and IPA
++- sense IDs and the Lexhint evidence used for scoring
++
++Index files should be built alongside the pronunciation lexicon and published with matching dataset/version metadata. Do not independently update one without the other.
++
++## Integration boundary
++
++- `lexhint`: add a public streaming `Lexicon.iter_entries()` API (implementation brief 01).
++- `g2lex-data`: generate the JSON index and add `READING:<reading_id>` selectors to the corresponding lexicon entries (brief 02).
++- G2P frontends: pass token spans, POS, and lemma to the resolver and use the returned selector (briefs 03–06).
++- Based on the current interfaces reviewed, G2Lex already supports arbitrary selector names and Lexphon already passes a selector tag to lookup. No functional changes to those packages are expected for this MVP; add compatibility tests where they are consumed.
+diff --git a/docs/Makefile b/docs/Makefile
+new file mode 100644
+index 0000000..3ff8019
+--- /dev/null
++++ b/docs/Makefile
+@@ -0,0 +1,32 @@
++# Makefile for Sphinx documentation
++
++# You can set these variables from the command line
++SPHINXOPTS    ?=
++SPHINXBUILD   ?= sphinx-build
++SOURCEDIR     = .
++BUILDDIR      = _build
++
++# Put it first so that "make" without argument is like "make help".
++help:
++	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++
++.PHONY: help Makefile clean html livehtml
++
++# Clean build directory
++clean:
++	rm -rf $(BUILDDIR)/*
++
++# Build HTML documentation
++html:
++	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++	@echo
++	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."
++
++# Live reload server (requires sphinx-autobuild)
++livehtml:
++	sphinx-autobuild "$(SOURCEDIR)" "$(BUILDDIR)/html" $(SPHINXOPTS) $(O)
++
++# Catch-all target: route all unknown targets to Sphinx using the new
++# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
++%: Makefile
++	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+diff --git a/docs/conf.py b/docs/conf.py
+new file mode 100644
+index 0000000..365dd71
+--- /dev/null
++++ b/docs/conf.py
+@@ -0,0 +1,101 @@
++# -- Path setup --------------------------------------------------------------
++
++# If extensions (or modules to document with autodoc) are in another directory,
++# add these directories to sys.path here. If the directory is relative to the
++# documentation root, use os.path.abspath to make it absolute, like shown here.
++#
++import os
++import sys
++
++sys.path.insert(0, os.path.abspath(".."))
++sys.path.insert(0, os.path.abspath("../pronresolve"))
++# -- Project information -----------------------------------------------------
++# https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
++
++project = "pronresolve"
++copyright = "2026, Holger Nahrstaedt"
++author = "Holger Nahrstaedt"
++
++# -- General configuration ---------------------------------------------------
++
++# Add any Sphinx extension module names here, as strings. They can be
++# extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
++# ones.
++extensions = [
++    "sphinx.ext.autodoc",
++    "sphinx.ext.doctest",
++    "sphinx.ext.intersphinx",
++    "sphinx.ext.napoleon",
++    "sphinx.ext.viewcode",
++    "myst_parser",
++]
++
++# All authored Sphinx pages are MyST Markdown.
++source_suffix = {
++    ".md": "markdown",
++}
++
++# Required for readable Markdown-native admonitions.
++myst_enable_extensions = ["colon_fence"]
++
++# Current documentation contains headings through H4.
++myst_heading_anchors = 4
++
++# Napoleon settings for NumPy-style docstrings
++napoleon_google_docstring = False
++napoleon_numpy_docstring = True
++napoleon_include_init_with_doc = True
++napoleon_include_private_with_doc = False
++napoleon_include_special_with_doc = True
++napoleon_use_admonition_for_examples = False
++napoleon_use_admonition_for_notes = False
++napoleon_use_admonition_for_references = False
++napoleon_use_ivar = False
++napoleon_use_param = True
++napoleon_use_rtype = True
++napoleon_preprocess_types = False
++napoleon_type_aliases = None
++napoleon_attr_annotations = True
++
++# Autodoc settings
++autodoc_default_options = {
++    "members": True,
++    "undoc-members": True,
++    "show-inheritance": True,
++    "member-order": "bysource",
++}
++
++# Add any paths that contain templates here, relative to this directory.
++templates_path = ["_templates"]
++
++# List of patterns, relative to source directory, that match files and
++# directories to ignore when looking for source files.
++# This pattern also affects html_static_path and html_extra_path.
++exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
++
++
++# -- Options for HTML output -------------------------------------------------
++
++# The theme to use for HTML and HTML Help pages.  See the documentation for
++# a list of builtin themes.
++#
++# html_theme = 'furo'
++
++html_theme = "sphinx_rtd_theme"
++
++html_theme_options = {
++    "navigation_depth": 4,
++    "titles_only": False,
++}
++
++# Add any paths that contain custom static files (such as style sheets) here,
++# relative to this directory. They are copied after the builtin static files,
++# so a file named "default.css" will overwrite the builtin "default.css".
++# html_static_path = ['_static']
++
++# Set up intersphinx maps
++intersphinx_mapping = {
++    "python": ("https://docs.python.org/3", None),
++    "numpy": ("https://numpy.org/doc/stable", None),
++    "PIL": ("https://pillow.readthedocs.io/en/stable", None),
++}
+diff --git a/docs/make.bat b/docs/make.bat
+new file mode 100644
+index 0000000..d6a9242
+--- /dev/null
++++ b/docs/make.bat
+@@ -0,0 +1,113 @@
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++set SPHINXBUILD=sphinx-build
++set BUILDDIR=build
++set ALLSPHINXOPTS=-d %BUILDDIR%/doctrees %SPHINXOPTS% .
++if NOT "%PAPER%" == "" (
++	set ALLSPHINXOPTS=-D latex_paper_size=%PAPER% %ALLSPHINXOPTS%
++)
++
++if "%1" == "" goto help
++
++if "%1" == "help" (
++	:help
++	echo.Please use `make ^<target^>` where ^<target^> is one of
++	echo.  html      to make standalone HTML files
++	echo.  dirhtml   to make HTML files named index.html in directories
++	echo.  pickle    to make pickle files
++	echo.  json      to make JSON files
++	echo.  htmlhelp  to make HTML files and a HTML help project
++	echo.  qthelp    to make HTML files and a qthelp project
++	echo.  latex     to make LaTeX files, you can set PAPER=a4 or PAPER=letter
++	echo.  changes   to make an overview over all changed/added/deprecated items
++	echo.  linkcheck to check all external links for integrity
++	echo.  doctest   to run all doctests embedded in the documentation if enabled
++	goto end
++)
++
++if "%1" == "clean" (
++	for /d %%i in (%BUILDDIR%\*) do rmdir /q /s %%i
++	del /q /s %BUILDDIR%\*
++	goto end
++)
++
++if "%1" == "html" (
++	%SPHINXBUILD% -b html %ALLSPHINXOPTS% %BUILDDIR%/html
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/html.
++	goto end
++)
++
++if "%1" == "dirhtml" (
++	%SPHINXBUILD% -b dirhtml %ALLSPHINXOPTS% %BUILDDIR%/dirhtml
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/dirhtml.
++	goto end
++)
++
++if "%1" == "pickle" (
++	%SPHINXBUILD% -b pickle %ALLSPHINXOPTS% %BUILDDIR%/pickle
++	echo.
++	echo.Build finished; now you can process the pickle files.
++	goto end
++)
++
++if "%1" == "json" (
++	%SPHINXBUILD% -b json %ALLSPHINXOPTS% %BUILDDIR%/json
++	echo.
++	echo.Build finished; now you can process the JSON files.
++	goto end
++)
++
++if "%1" == "htmlhelp" (
++	%SPHINXBUILD% -b htmlhelp %ALLSPHINXOPTS% %BUILDDIR%/htmlhelp
++	echo.
++	echo.Build finished; now you can run HTML Help Workshop with the ^
++.hhp project file in %BUILDDIR%/htmlhelp.
++	goto end
++)
++
++if "%1" == "qthelp" (
++	%SPHINXBUILD% -b qthelp %ALLSPHINXOPTS% %BUILDDIR%/qthelp
++	echo.
++	echo.Build finished; now you can run "qcollectiongenerator" with the ^
++.qhcp project file in %BUILDDIR%/qthelp, like this:
++	echo.^> qcollectiongenerator %BUILDDIR%\qthelp\PyWavelets.qhcp
++	echo.To view the help file:
++	echo.^> assistant -collectionFile %BUILDDIR%\qthelp\PyWavelets.ghc
++	goto end
++)
++
++if "%1" == "latex" (
++	%SPHINXBUILD% -b latex %ALLSPHINXOPTS% %BUILDDIR%/latex
++	echo.
++	echo.Build finished; the LaTeX files are in %BUILDDIR%/latex.
++	goto end
++)
++
++if "%1" == "changes" (
++	%SPHINXBUILD% -b changes %ALLSPHINXOPTS% %BUILDDIR%/changes
++	echo.
++	echo.The overview file is in %BUILDDIR%/changes.
++	goto end
++)
++
++if "%1" == "linkcheck" (
++	%SPHINXBUILD% -b linkcheck %ALLSPHINXOPTS% %BUILDDIR%/linkcheck
++	echo.
++	echo.Link check complete; look for any errors in the above output ^
++or in %BUILDDIR%/linkcheck/output.txt.
++	goto end
++)
++
++if "%1" == "doctest" (
++	%SPHINXBUILD% -b doctest %ALLSPHINXOPTS% %BUILDDIR%/doctest
++	echo.
++	echo.Testing of doctests in the sources finished, look at the ^
++results in %BUILDDIR%/doctest/output.txt.
++	goto end
++)
++
++:end
+diff --git a/docs/make.py b/docs/make.py
+new file mode 100755
+index 0000000..5e2a591
+--- /dev/null
++++ b/docs/make.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python
++"""
++Script to build documentation for pykokoro.
++
++This script builds the Sphinx documentation for the pykokoro package.
++It can be run using:
++    python docs/make.py [option]
++
++Options:
++    clean   - clean the build directory
++    html    - build HTML documentation
++    dirhtml - build HTML documentation with directory structure
++    all     - build all documentation formats
++    help    - show help message
++"""
++
++import os
++import shutil
++import subprocess
++import sys
++
++
++def main():
++    """Run the script."""
++    sphinx_build = "sphinx-build"
++
++    # Determine if we're being run from docs/ or from project root
++    script_dir = os.path.dirname(os.path.abspath(__file__))
++    if os.path.basename(script_dir) == "docs":
++        # Running from docs directory
++        build_dir = "_build"
++        source_dir = "."
++    else:
++        # Running from project root
++        build_dir = os.path.join("docs", "_build")
++        source_dir = "docs"
++
++    target = "html" if len(sys.argv) < 2 else sys.argv[1]
++
++    if target == "clean":
++        if os.path.exists(build_dir):
++            print(f"Cleaning {build_dir}...")
++            shutil.rmtree(build_dir)
++        return 0
++
++    if target == "help":
++        print(__doc__)
++        return 0
++
++    if not os.path.exists(build_dir):
++        os.makedirs(build_dir)
++
++    # Set of valid targets
++    valid_targets = {
++        "html",
++        "dirhtml",
++        "latex",
++        "latexpdf",
++        "text",
++        "man",
++        "changes",
++        "linkcheck",
++        "doctest",
++        "all",
++    }
++
++    if target not in valid_targets:
++        print(f"Unknown target: {target}")
++        print("Use 'help' target for help")
++        return 1
++
++    if target == "all":
++        # Build all formats
++        for fmt in ["html", "dirhtml", "latex"]:
++            cmd = [sphinx_build, "-b", fmt, source_dir, os.path.join(build_dir, fmt)]
++            print(f"Building {fmt} documentation...")
++            subprocess.run(cmd, check=True)
++    else:
++        # Build specific format
++        cmd = [sphinx_build, "-b", target, source_dir, os.path.join(build_dir, target)]
++        print(f"Building {target} documentation...")
++        subprocess.run(cmd, check=True)
++
++    print(f"Build finished. Documentation is in {os.path.join(build_dir, target)}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/docs/requirements.txt b/docs/requirements.txt
+new file mode 100644
+index 0000000..ecff980
+--- /dev/null
++++ b/docs/requirements.txt
+@@ -0,0 +1,5 @@
++sphinx>=7.0.0
++sphinx-rtd-theme>=2.0.0
++sphinx-autobuild>=2024.0.0
++myst-parser>=2.0.0
++pillow
+diff --git a/pronresolve/__init__.py b/pronresolve/__init__.py
+new file mode 100644
+index 0000000..881a502
+--- /dev/null
++++ b/pronresolve/__init__.py
+@@ -0,0 +1,33 @@
++"""Data-driven pronunciation ambiguity discovery and resolution."""
++
++try:
++    from ._version import __version__
++except ImportError:  # Source checkout before setuptools-scm has generated _version.py.
++    __version__ = "0+unknown"
++
++from .discovery import discover_ambiguities, reading_id_for
++from .models import (
++    AmbiguityIndex,
++    CandidateScore,
++    DiscoveryReport,
++    DiscoveryResult,
++    ReadingProfile,
++    Resolution,
++)
++from .resolver import Resolver
++from .storage import load_index, save_index
++
++__all__ = [
++    "__version__",
++    "AmbiguityIndex",
++    "CandidateScore",
++    "DiscoveryReport",
++    "DiscoveryResult",
++    "ReadingProfile",
++    "Resolution",
++    "Resolver",
++    "discover_ambiguities",
++    "load_index",
++    "reading_id_for",
++    "save_index",
++]
+diff --git a/pronresolve/__main__.py b/pronresolve/__main__.py
+new file mode 100644
+index 0000000..eb53e2f
+--- /dev/null
++++ b/pronresolve/__main__.py
+@@ -0,0 +1,3 @@
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/pronresolve/cli.py b/pronresolve/cli.py
+new file mode 100644
+index 0000000..2085662
+--- /dev/null
++++ b/pronresolve/cli.py
+@@ -0,0 +1,91 @@
++"""Command-line tools for building and inspecting ambiguity indexes."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++from typing import Any
++from collections.abc import Iterable
++
++from .discovery import discover_ambiguities
++from .storage import load_index, save_index
++
++
++def _jsonl_entries(path: Path) -> Iterable[dict[str, Any]]:
++    with path.open("r", encoding="utf-8") as stream:
++        for line_number, line in enumerate(stream, start=1):
++            if not line.strip():
++                continue
++            try:
++                value = json.loads(line)
++            except json.JSONDecodeError as exc:
++                raise ValueError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
++            if not isinstance(value, dict):
++                raise ValueError(f"{path}:{line_number}: each JSONL record must be an object")
++            yield value
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(prog="pronresolve")
++    subparsers = parser.add_subparsers(dest="command", required=True)
++
++    build = subparsers.add_parser("build", help="build an ambiguity index from JSONL entries")
++    build.add_argument("--input-jsonl", required=True, type=Path)
++    build.add_argument("--output", required=True, type=Path)
++    build.add_argument("--language", required=True)
++    build.add_argument("--locale")
++
++    inspect = subparsers.add_parser("inspect", help="print index summary")
++    inspect.add_argument("index", type=Path)
++
++    validate = subparsers.add_parser("validate", help="validate an index schema")
++    validate.add_argument("index", type=Path)
++
++    args = parser.parse_args(argv)
++    try:
++        if args.command == "build":
++            result = discover_ambiguities(
++                _jsonl_entries(args.input_jsonl),
++                language=args.language,
++                locale=args.locale,
++            )
++            save_index(result.index, args.output)
++            report_path = args.output.with_name(args.output.name + ".report.json")
++            report_path.write_text(
++                json.dumps(result.report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True)
++                + "\n",
++                encoding="utf-8",
++            )
++            print(
++                json.dumps(
++                    {
++                        "index": str(args.output),
++                        "report": str(report_path),
++                        **result.report.as_dict(),
++                    },
++                    ensure_ascii=False,
++                    indent=2,
++                )
++            )
++            return 0
++
++        index = load_index(args.index)
++        summary = {
++            "valid": True,
++            "schema_version": index.schema_version,
++            "language": index.language,
++            "locale": index.locale,
++            "profile_count": len(index.profiles),
++            "ambiguous_words": len({profile.word.casefold() for profile in index.profiles}),
++        }
++        print(json.dumps(summary, ensure_ascii=False, indent=2))
++        return 0
++    except (OSError, ValueError, json.JSONDecodeError) as exc:
++        print(f"pronresolve: error: {exc}", file=sys.stderr)
++        return 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/pronresolve/discovery.py b/pronresolve/discovery.py
+new file mode 100644
+index 0000000..1a4a1db
+--- /dev/null
++++ b/pronresolve/discovery.py
+@@ -0,0 +1,242 @@
++"""Discover resolvable same-spelling, same-POS pronunciation differences."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import re
++import unicodedata
++from collections import defaultdict
++from collections.abc import Iterable, Mapping
++from typing import Any
++
++from .models import AmbiguityIndex, DiscoveryReport, DiscoveryResult, ReadingProfile
++from .normalization import normalize_ipa, normalize_pos, normalize_word
++
++_LANG_RE = re.compile(r"[^a-z0-9]+")
++
++
++def _field(value: Any, name: str, default: Any = None) -> Any:
++    if isinstance(value, Mapping):
++        return value.get(name, default)
++    return getattr(value, name, default)
++
++
++def _as_sequence(value: Any) -> tuple[Any, ...]:
++    if value is None:
++        return ()
++    if isinstance(value, (str, bytes)):
++        return (value,) if value else ()
++    try:
++        return tuple(value)
++    except TypeError:
++        return (value,)
++
++
++def _unique_text(values: Iterable[Any]) -> tuple[str, ...]:
++    result: list[str] = []
++    seen: set[str] = set()
++    for value in values:
++        text = unicodedata.normalize("NFC", str(value or "")).strip()
++        if text and text not in seen:
++            seen.add(text)
++            result.append(text)
++    return tuple(result)
++
++
++def _related_text(value: Any) -> str:
++    if isinstance(value, str):
++        return value
++    return str(_field(value, "word", "") or "")
++
++
++def _example_text(value: Any) -> str:
++    if isinstance(value, str):
++        return value
++    return str(_field(value, "text", "") or "")
++
++
++def _pronunciations(entry: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
++    raw = _field(entry, "pronunciations")
++    if raw is None:
++        raw = _field(entry, "sounds", ())
++    result: list[tuple[str, tuple[str, ...]]] = []
++    seen: set[str] = set()
++    for item in _as_sequence(raw):
++        ipa = normalize_ipa(str(_field(item, "ipa", "") or ""))
++        if not ipa or ipa in seen:
++            continue
++        seen.add(ipa)
++        tags = _unique_text(_as_sequence(_field(item, "tags", ())))
++        result.append((ipa, tags))
++    return tuple(result)
++
++
++def _entry_evidence(entry: Any) -> dict[str, tuple[str, ...]]:
++    sense_ids: list[str] = []
++    glosses: list[str] = []
++    topics: list[str] = []
++    tags: list[str] = []
++    examples: list[str] = []
++    synonyms: list[str] = []
++    antonyms: list[str] = []
++
++    for sense in _as_sequence(_field(entry, "senses", ())):
++        sense_id = _field(sense, "sense_id")
++        if sense_id:
++            sense_ids.append(str(sense_id))
++        glosses.extend(_as_sequence(_field(sense, "glosses", ())))
++        topics.extend(_as_sequence(_field(sense, "topics", ())))
++        tags.extend(_as_sequence(_field(sense, "tags", ())))
++        examples.extend(_example_text(item) for item in _as_sequence(_field(sense, "examples", ())))
++        synonyms.extend(_related_text(item) for item in _as_sequence(_field(sense, "synonyms", ())))
++        antonyms.extend(_related_text(item) for item in _as_sequence(_field(sense, "antonyms", ())))
++
++    return {
++        "sense_ids": _unique_text(sense_ids),
++        "etymology_numbers": _unique_text((_field(entry, "etymology_number"),)),
++        "glosses": _unique_text(glosses),
++        "topics": _unique_text(topics),
++        "tags": _unique_text(tags),
++        "examples": _unique_text(examples),
++        "synonyms": _unique_text(synonyms),
++        "antonyms": _unique_text(antonyms),
++    }
++
++
++def reading_id_for(language: str, word: str, pos: str, ipa: str) -> str:
++    """Return a stable ID for a reading, independent of input order."""
++    lang = _LANG_RE.sub("-", normalize_word(language)).strip("-") or "und"
++    payload = json.dumps(
++        [
++            normalize_word(language),
++            normalize_word(word),
++            normalize_pos(pos),
++            normalize_ipa(ipa),
++        ],
++        ensure_ascii=False,
++        separators=(",", ":"),
++    ).encode("utf-8")
++    digest = hashlib.blake2s(payload, digest_size=8, person=b"prnrs1").hexdigest()
++    return f"r1-{lang}-{digest}"
++
++
++def discover_ambiguities(
++    entries: Iterable[Any],
++    *,
++    language: str,
++    locale: str | None = None,
++) -> DiscoveryResult:
++    """Scan dictionary-entry objects and create profiles only when sense linkage is safe.
++
++    Entries can be Lexhint ``DictionaryEntry`` instances or mappings with the same
++    fields. Entries are consumed once, so generators and streaming iterators work.
++    """
++    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
++    entries_scanned = 0
++    entries_without_pronunciation = 0
++
++    for entry in entries:
++        entries_scanned += 1
++        raw_word = str(_field(entry, "word", "") or "").strip()
++        if not raw_word:
++            continue
++        word = normalize_word(raw_word)
++        pos = normalize_pos(str(_field(entry, "pos", "") or "ENTRY"))
++        pronunciations = _pronunciations(entry)
++        if not pronunciations:
++            entries_without_pronunciation += 1
++            continue
++        grouped[(word, pos)].append(
++            {
++                "word": raw_word,
++                "pronunciations": pronunciations,
++                "evidence": _entry_evidence(entry),
++            }
++        )
++
++    profiles: list[ReadingProfile] = []
++    ambiguous_keys = 0
++    resolvable_keys = 0
++    unlinked_ambiguity_keys = 0
++    non_ambiguous_keys = 0
++    unlinked_keys: list[str] = []
++
++    for (normalized_word, pos), entry_rows in sorted(grouped.items()):
++        all_ipa = {ipa for row in entry_rows for ipa, _tags in row["pronunciations"]}
++        if len(all_ipa) <= 1:
++            non_ambiguous_keys += 1
++            continue
++
++        ambiguous_keys += 1
++
++        # An entry carrying multiple IPA values does not tell us which sense maps
++        # to which IPA. Do not silently attach all its senses to every reading.
++        if any(len(row["pronunciations"]) != 1 for row in entry_rows):
++            unlinked_ambiguity_keys += 1
++            unlinked_keys.append(f"{normalized_word}/{pos}")
++            continue
++
++        by_ipa: dict[str, list[dict[str, Any]]] = defaultdict(list)
++        for row in entry_rows:
++            ipa, _tags = row["pronunciations"][0]
++            by_ipa[ipa].append(row)
++
++        if len(by_ipa) < 2:
++            non_ambiguous_keys += 1
++            continue
++
++        resolvable_keys += 1
++        # The index key is normalized; using it as the profile word keeps output
++        # deterministic even when the source contains case variants in different orders.
++        display_word = normalized_word
++
++        for ipa, ipa_rows in sorted(by_ipa.items()):
++            merged: dict[str, list[str]] = {
++                "sense_ids": [],
++                "etymology_numbers": [],
++                "glosses": [],
++                "topics": [],
++                "tags": [],
++                "examples": [],
++                "synonyms": [],
++                "antonyms": [],
++            }
++            for row in ipa_rows:
++                for field_name, values in row["evidence"].items():
++                    merged[field_name].extend(values)
++            unique = {name: _unique_text(values) for name, values in merged.items()}
++            profiles.append(
++                ReadingProfile(
++                    word=display_word,
++                    pos=pos,
++                    reading_id=reading_id_for(language, normalized_word, pos, ipa),
++                    ipa=(ipa,),
++                    sense_ids=unique["sense_ids"],
++                    etymology_numbers=unique["etymology_numbers"],
++                    glosses=unique["glosses"],
++                    topics=unique["topics"],
++                    tags=unique["tags"],
++                    examples=unique["examples"],
++                    synonyms=unique["synonyms"],
++                    antonyms=unique["antonyms"],
++                )
++            )
++
++    profiles.sort(key=lambda profile: (normalize_word(profile.word), profile.pos, profile.ipa))
++    index = AmbiguityIndex(
++        language=normalize_word(language),
++        locale=locale,
++        profiles=tuple(profiles),
++    )
++    report = DiscoveryReport(
++        entries_scanned=entries_scanned,
++        keys_scanned=len(grouped),
++        ambiguous_keys=ambiguous_keys,
++        resolvable_keys=resolvable_keys,
++        unlinked_ambiguity_keys=unlinked_ambiguity_keys,
++        non_ambiguous_keys=non_ambiguous_keys,
++        entries_without_pronunciation=entries_without_pronunciation,
++        unlinked_keys=tuple(unlinked_keys),
++    )
++    return DiscoveryResult(index=index, report=report)
+diff --git a/pronresolve/models.py b/pronresolve/models.py
+new file mode 100644
+index 0000000..b4d6054
+--- /dev/null
++++ b/pronresolve/models.py
+@@ -0,0 +1,167 @@
++"""Immutable public data models and JSON schema conversion."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++from collections.abc import Mapping
++
++INDEX_SCHEMA_VERSION = 1
++
++
++def _strings(value: Any) -> tuple[str, ...]:
++    if value is None:
++        return ()
++    if isinstance(value, str):
++        return (value,) if value else ()
++    try:
++        return tuple(str(item) for item in value if item is not None and str(item))
++    except TypeError:
++        return ()
++
++
++@dataclass(frozen=True, slots=True)
++class ReadingProfile:
++    word: str
++    pos: str
++    reading_id: str
++    ipa: tuple[str, ...]
++    sense_ids: tuple[str, ...] = ()
++    etymology_numbers: tuple[str, ...] = ()
++    glosses: tuple[str, ...] = ()
++    topics: tuple[str, ...] = ()
++    tags: tuple[str, ...] = ()
++    examples: tuple[str, ...] = ()
++    synonyms: tuple[str, ...] = ()
++    antonyms: tuple[str, ...] = ()
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "word": self.word,
++            "pos": self.pos,
++            "reading_id": self.reading_id,
++            "ipa": list(self.ipa),
++            "sense_ids": list(self.sense_ids),
++            "etymology_numbers": list(self.etymology_numbers),
++            "glosses": list(self.glosses),
++            "topics": list(self.topics),
++            "tags": list(self.tags),
++            "examples": list(self.examples),
++            "synonyms": list(self.synonyms),
++            "antonyms": list(self.antonyms),
++        }
++
++    @classmethod
++    def from_dict(cls, value: Mapping[str, Any]) -> ReadingProfile:
++        return cls(
++            word=str(value["word"]),
++            pos=str(value["pos"]),
++            reading_id=str(value["reading_id"]),
++            ipa=_strings(value.get("ipa")),
++            sense_ids=_strings(value.get("sense_ids")),
++            etymology_numbers=_strings(value.get("etymology_numbers")),
++            glosses=_strings(value.get("glosses")),
++            topics=_strings(value.get("topics")),
++            tags=_strings(value.get("tags")),
++            examples=_strings(value.get("examples")),
++            synonyms=_strings(value.get("synonyms")),
++            antonyms=_strings(value.get("antonyms")),
++        )
++
++
++@dataclass(frozen=True, slots=True)
++class AmbiguityIndex:
++    language: str
++    locale: str | None
++    profiles: tuple[ReadingProfile, ...]
++    schema_version: int = INDEX_SCHEMA_VERSION
++
++    def __post_init__(self) -> None:
++        if self.schema_version != INDEX_SCHEMA_VERSION:
++            raise ValueError(
++                f"unsupported ambiguity index schema {self.schema_version}; "
++                f"supported schema is {INDEX_SCHEMA_VERSION}"
++            )
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "schema_version": self.schema_version,
++            "language": self.language,
++            "locale": self.locale,
++            "profiles": [profile.to_dict() for profile in self.profiles],
++        }
++
++    @classmethod
++    def from_dict(cls, value: Mapping[str, Any]) -> AmbiguityIndex:
++        version = int(value.get("schema_version", 0))
++        if version != INDEX_SCHEMA_VERSION:
++            raise ValueError(
++                f"unsupported ambiguity index schema {version}; "
++                f"supported schema is {INDEX_SCHEMA_VERSION}"
++            )
++        raw_profiles = value.get("profiles", ())
++        if not isinstance(raw_profiles, list):
++            raise ValueError("'profiles' must be a JSON array")
++        profiles = tuple(
++            ReadingProfile.from_dict(item) for item in raw_profiles if isinstance(item, Mapping)
++        )
++        return cls(
++            language=str(value.get("language", "")),
++            locale=str(value["locale"]) if value.get("locale") is not None else None,
++            profiles=profiles,
++            schema_version=version,
++        )
++
++
++@dataclass(frozen=True, slots=True)
++class DiscoveryReport:
++    entries_scanned: int
++    keys_scanned: int
++    ambiguous_keys: int
++    resolvable_keys: int
++    unlinked_ambiguity_keys: int
++    non_ambiguous_keys: int
++    entries_without_pronunciation: int
++    unlinked_keys: tuple[str, ...] = ()
++
++    def as_dict(self) -> dict[str, Any]:
++        return {
++            "entries_scanned": self.entries_scanned,
++            "keys_scanned": self.keys_scanned,
++            "ambiguous_keys": self.ambiguous_keys,
++            "resolvable_keys": self.resolvable_keys,
++            "unlinked_ambiguity_keys": self.unlinked_ambiguity_keys,
++            "non_ambiguous_keys": self.non_ambiguous_keys,
++            "entries_without_pronunciation": self.entries_without_pronunciation,
++            "unlinked_keys": list(self.unlinked_keys),
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class DiscoveryResult:
++    index: AmbiguityIndex
++    report: DiscoveryReport
++
++
++@dataclass(frozen=True, slots=True)
++class CandidateScore:
++    reading_id: str
++    score: float
++    matched_terms: tuple[str, ...]
++
++
++@dataclass(frozen=True, slots=True)
++class Resolution:
++    word: str
++    pos: str
++    reading_id: str
++    ipa: tuple[str, ...]
++    sense_ids: tuple[str, ...]
++    score: float
++    margin: float
++    evidence_terms: tuple[str, ...]
++    candidates: tuple[CandidateScore, ...]
++
++    @property
++    def selector(self) -> str:
++        return f"READING:{self.reading_id}"
+diff --git a/pronresolve/normalization.py b/pronresolve/normalization.py
+new file mode 100644
+index 0000000..1687f13
+--- /dev/null
++++ b/pronresolve/normalization.py
+@@ -0,0 +1,63 @@
++"""Small, dependency-free text normalization helpers."""
++
++from __future__ import annotations
++
++import re
++import unicodedata
++from dataclasses import dataclass
++
++_WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
++
++# Generic function words only; this is not a word- or heteronym-specific list.
++STOPWORDS = frozenset(
++    """
++    a an and are as at be been being but by can could did do does for from had has have he her
++    hers him his how i if in into is it its may me might must my no nor not of on once only or
++    other our ours out over own same she should so some such than that the their theirs them
++    then there these they this those through to too under until up very was we were what when
++    where which while who whom why will with would you your yours
++    """.split()
++)
++
++
++def normalize_word(value: str) -> str:
++    return unicodedata.normalize("NFC", str(value)).casefold().strip()
++
++
++def normalize_pos(value: str | None) -> str:
++    normalized = " ".join(unicodedata.normalize("NFC", str(value or "")).strip().split())
++    return normalized.upper() if normalized else "ENTRY"
++
++
++def normalize_ipa(value: str) -> str:
++    normalized = unicodedata.normalize("NFC", str(value or "")).strip()
++    if len(normalized) >= 2 and (
++        (normalized[0] == "[" and normalized[-1] == "]")
++        or (normalized[0] == "/" and normalized[-1] == "/")
++    ):
++        normalized = normalized[1:-1]
++    return normalized.strip()
++
++
++def tokens(value: str) -> tuple[str, ...]:
++    return tuple(normalize_word(match.group(0)) for match in _WORD_RE.finditer(value or ""))
++
++
++@dataclass(frozen=True, slots=True)
++class TokenSpan:
++    text: str
++    normalized: str
++    start: int
++    end: int
++
++
++def token_spans(value: str) -> tuple[TokenSpan, ...]:
++    return tuple(
++        TokenSpan(
++            text=match.group(0),
++            normalized=normalize_word(match.group(0)),
++            start=match.start(),
++            end=match.end(),
++        )
++        for match in _WORD_RE.finditer(value or "")
++    )
+diff --git a/pronresolve/resolver.py b/pronresolve/resolver.py
+new file mode 100644
+index 0000000..2a38218
+--- /dev/null
++++ b/pronresolve/resolver.py
+@@ -0,0 +1,201 @@
++"""Deterministic, explainable context-based pronunciation resolution."""
++
++from __future__ import annotations
++
++from collections import defaultdict
++from collections.abc import Mapping
++from pathlib import Path
++from typing import Any
++
++from .models import AmbiguityIndex, CandidateScore, ReadingProfile, Resolution
++from .normalization import STOPWORDS, normalize_pos, normalize_word, token_spans, tokens
++from .storage import load_index
++
++_FIELD_WEIGHTS = {
++    "glosses": 3.0,
++    "synonyms": 3.5,
++    "topics": 2.5,
++    "examples": 2.0,
++    "tags": 1.0,
++    "antonyms": 0.75,
++}
++
++
++class Resolver:
++    """Resolve a token only when lexical evidence and score margin are sufficient."""
++
++    def __init__(
++        self,
++        index: AmbiguityIndex | str | Path,
++        *,
++        min_score: float = 1.0,
++        min_margin: float = 0.75,
++    ) -> None:
++        self.index = load_index(index) if isinstance(index, (str, Path)) else index
++        if min_score < 0 or min_margin < 0:
++            raise ValueError("min_score and min_margin must be non-negative")
++        self.min_score = float(min_score)
++        self.min_margin = float(min_margin)
++        by_word: dict[str, list[ReadingProfile]] = defaultdict(list)
++        for profile in self.index.profiles:
++            by_word[normalize_word(profile.word)].append(profile)
++        self._by_word = dict(by_word)
++
++    @classmethod
++    def from_path(
++        cls,
++        path: str | Path,
++        *,
++        min_score: float = 1.0,
++        min_margin: float = 0.75,
++    ) -> Resolver:
++        return cls(path, min_score=min_score, min_margin=min_margin)
++
++    def resolve(
++        self,
++        text: str,
++        *,
++        start: int,
++        end: int,
++        pos: str | None = None,
++        lemma: str | None = None,
++    ) -> Resolution | None:
++        """Resolve the token spanning ``[start, end)`` in the original sentence.
++
++        Returns ``None`` for unknown words, insufficient evidence, a close score
++        tie, invalid offsets, or an omitted POS when the word has ambiguous POS groups.
++        """
++        if (
++            not isinstance(text, str)
++            or not isinstance(start, int)
++            or not isinstance(end, int)
++            or start < 0
++            or end <= start
++            or end > len(text)
++        ):
++            return None
++        target_text = lemma or text[start:end]
++        word = normalize_word(target_text)
++        if not word:
++            return None
++
++        profiles = self._by_word.get(word, [])
++        if not profiles:
++            return None
++
++        if pos is not None:
++            normalized_pos = normalize_pos(pos)
++            profiles = [
++                profile for profile in profiles if normalize_pos(profile.pos) == normalized_pos
++            ]
++        else:
++            pos_groups = {normalize_pos(profile.pos) for profile in profiles}
++            if len(pos_groups) != 1:
++                return None
++        if len(profiles) < 2:
++            return None
++
++        spans = token_spans(text)
++        target_index = next(
++            (index for index, span in enumerate(spans) if span.start < end and span.end > start),
++            sum(1 for span in spans if span.end <= start),
++        )
++        cue_distances: dict[str, int] = {}
++        for index, span in enumerate(spans):
++            if span.start < end and span.end > start:
++                continue
++            term = span.normalized
++            if not term or term in STOPWORDS or term == word:
++                continue
++            distance = abs(index - target_index)
++            prior = cue_distances.get(term)
++            if prior is None or distance < prior:
++                cue_distances[term] = distance
++
++        if not cue_distances:
++            return None
++
++        scored: list[CandidateScore] = []
++        profile_by_id = {profile.reading_id: profile for profile in profiles}
++        for profile in profiles:
++            field_tokens = {
++                field_name: {
++                    token
++                    for value in getattr(profile, field_name)
++                    for token in tokens(value)
++                    if token not in STOPWORDS
++                }
++                for field_name in _FIELD_WEIGHTS
++            }
++            score = 0.0
++            matched: list[str] = []
++            for term, distance in cue_distances.items():
++                matching_weight = max(
++                    (
++                        weight
++                        for field_name, weight in _FIELD_WEIGHTS.items()
++                        if term in field_tokens[field_name]
++                    ),
++                    default=0.0,
++                )
++                if matching_weight:
++                    # Adjacent evidence is strongest; distant cues still contribute.
++                    distance_factor = 1.0 / (1.0 + 0.15 * max(distance - 1, 0))
++                    score += matching_weight * distance_factor
++                    matched.append(term)
++            scored.append(
++                CandidateScore(
++                    reading_id=profile.reading_id,
++                    score=round(score, 6),
++                    matched_terms=tuple(matched),
++                )
++            )
++
++        scored.sort(key=lambda item: (-item.score, item.reading_id))
++        best = scored[0]
++        second_score = scored[1].score if len(scored) > 1 else 0.0
++        margin = round(best.score - second_score, 6)
++        if best.score < self.min_score or margin < self.min_margin:
++            return None
++
++        selected = profile_by_id[best.reading_id]
++        return Resolution(
++            word=selected.word,
++            pos=selected.pos,
++            reading_id=selected.reading_id,
++            ipa=selected.ipa,
++            sense_ids=selected.sense_ids,
++            score=best.score,
++            margin=margin,
++            evidence_terms=best.matched_terms,
++            candidates=tuple(scored),
++        )
++
++    def resolve_token(self, text: str, token: Any) -> Resolution | None:
++        """Convenience adapter for token objects or mappings with offsets and POS."""
++
++        def get(name: str, default: Any = None) -> Any:
++            if isinstance(token, Mapping):
++                return token.get(name, default)
++            return getattr(token, name, default)
++
++        # Prefer character offsets. For spaCy-like tokens, ``idx`` is the
++        # character start while ``start`` is a token index.
++        start = get("start_char", get("idx", get("start")))
++        end = get("end_char", get("end"))
++        lemma = get("lemma") or get("lemma_", None)
++        pos = get("pos") or get("pos_", None)
++        surface = get("text") or get("orth_", None)
++        if not isinstance(start, int):
++            return None
++        if not isinstance(end, int) and surface:
++            end = start + len(str(surface))
++        if not isinstance(end, int):
++            return None
++        return self.resolve(
++            text,
++            start=start,
++            end=end,
++            pos=str(pos) if pos else None,
++            lemma=str(lemma or surface) if (lemma or surface) else None,
++        )
+diff --git a/pronresolve/storage.py b/pronresolve/storage.py
+new file mode 100644
+index 0000000..3592ae2
+--- /dev/null
++++ b/pronresolve/storage.py
+@@ -0,0 +1,28 @@
++"""JSON persistence for generated ambiguity indexes."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from .models import AmbiguityIndex
++
++
++def save_index(index: AmbiguityIndex, path: str | Path) -> Path:
++    destination = Path(path)
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    temporary = destination.with_name(destination.name + ".tmp")
++    temporary.write_text(
++        json.dumps(index.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
++        encoding="utf-8",
++    )
++    temporary.replace(destination)
++    return destination
++
++
++def load_index(path: str | Path) -> AmbiguityIndex:
++    source = Path(path)
++    value = json.loads(source.read_text(encoding="utf-8"))
++    if not isinstance(value, dict):
++        raise ValueError("ambiguity index root must be a JSON object")
++    return AmbiguityIndex.from_dict(value)
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..0a04dba
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,51 @@
++[build-system]
++requires = ["setuptools>=69", "setuptools-scm[toml]>=8"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "pronresolve"
++dynamic = ["version"]
++description = "Data-driven pronunciation ambiguity discovery and context resolution"
++readme = "README.md"
++requires-python = ">=3.10"
++license = { text = "MIT" }
++authors = [{ name = "Lexicon g2p contributors" }]
++keywords = ["pronunciation", "heteronyms", "g2p", "lexicon", "phonemization"]
++classifiers = [
++  "Development Status :: 3 - Alpha",
++  "Intended Audience :: Developers",
++  "License :: OSI Approved :: MIT License",
++  "Operating System :: OS Independent",
++  "Programming Language :: Python :: 3",
++  "Programming Language :: Python :: 3.10",
++  "Programming Language :: Python :: 3.11",
++  "Programming Language :: Python :: 3.12",
++  "Programming Language :: Python :: 3.13",
++  "Topic :: Text Processing :: Linguistic",
++]
++
++[project.optional-dependencies]
++dev = ["pytest>=8", "build>=1", "mypy>=1.11", "ruff>=0.6"]
++
++[project.scripts]
++pronresolve = "pronresolve.cli:main"
++
++[tool.setuptools]
++include-package-data = true
++
++[tool.setuptools.packages.find]
++where = ["."]
++include = ["pronresolve*"]
++exclude = ["tests*", "implementation-briefs*"]
++
++[tool.setuptools_scm]
++version_file = "pronresolve/_version.py"
++fallback_version = "0.1.0.dev0"
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
++addopts = "-q"
++
++[tool.ruff]
++line-length = 100
++target-version = "py310"
+diff --git a/tests/test_discovery.py b/tests/test_discovery.py
+new file mode 100644
+index 0000000..15a8776
+--- /dev/null
++++ b/tests/test_discovery.py
+@@ -0,0 +1,88 @@
++from pronresolve import discover_ambiguities
++
++
++def entry(word, pos, ipa, gloss, sense_id):
++    return {
++        "word": word,
++        "pos": pos,
++        "etymology_number": "1",
++        "pronunciations": [{"ipa": ipa, "tags": []}],
++        "senses": [
++            {
++                "sense_id": sense_id,
++                "glosses": [gloss],
++                "topics": [],
++                "tags": [],
++                "examples": [],
++                "synonyms": [],
++                "antonyms": [],
++            }
++        ],
++    }
++
++
++def test_discovers_different_ipa_for_same_word_and_pos():
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "/wʌg/", "a small bird", "sense-a"),
++            entry("Wug", "NOUN", "[wuːg]", "a bend in a road", "sense-b"),
++        ],
++        language="en",
++        locale="en-US",
++    )
++
++    assert len(result.index.profiles) == 2
++    assert result.report.resolvable_keys == 1
++    assert result.report.unlinked_ambiguity_keys == 0
++    assert {profile.ipa[0] for profile in result.index.profiles} == {"wʌg", "wuːg"}
++    assert {profile.word.casefold() for profile in result.index.profiles} == {"wug"}
++
++
++def test_same_entry_with_two_ipa_is_reported_but_not_guessed():
++    result = discover_ambiguities(
++        [
++            {
++                "word": "wug",
++                "pos": "noun",
++                "pronunciations": [{"ipa": "wʌg"}, {"ipa": "wuːg"}],
++                "senses": [{"sense_id": "sense-a", "glosses": ["a small bird"]}],
++            }
++        ],
++        language="en",
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.unlinked_ambiguity_keys == 1
++    assert result.report.unlinked_keys == ("wug/NOUN",)
++
++
++def test_same_ipa_across_entries_is_not_ambiguous():
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "wʌg", "a bird", "sense-a"),
++            entry("wug", "noun", "/wʌg/", "a type of bird", "sense-b"),
++        ],
++        language="en",
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.non_ambiguous_keys == 1
++
++
++def test_reading_ids_do_not_depend_on_input_order():
++    rows = [
++        entry("wug", "noun", "wʌg", "a bird", "sense-a"),
++        entry("wug", "noun", "wuːg", "a bend", "sense-b"),
++    ]
++    one = discover_ambiguities(rows, language="en").index
++    two = discover_ambiguities(reversed(rows), language="en").index
++    assert {p.reading_id for p in one.profiles} == {p.reading_id for p in two.profiles}
++
++
++def test_report_counts_entries_without_pronunciation():
++    result = discover_ambiguities(
++        [{"word": "blank", "pos": "noun", "senses": []}],
++        language="en",
++    )
++    assert result.report.entries_scanned == 1
++    assert result.report.entries_without_pronunciation == 1
+diff --git a/tests/test_resolver.py b/tests/test_resolver.py
+new file mode 100644
+index 0000000..afb3bad
+--- /dev/null
++++ b/tests/test_resolver.py
+@@ -0,0 +1,89 @@
++from pronresolve import AmbiguityIndex, ReadingProfile, Resolver
++
++
++def profile(ipa, gloss, reading_id):
++    return ReadingProfile(
++        word="wug",
++        pos="NOUN",
++        reading_id=reading_id,
++        ipa=(ipa,),
++        sense_ids=(f"sense-{reading_id}",),
++        glosses=(gloss,),
++    )
++
++
++def make_resolver():
++    return Resolver(
++        AmbiguityIndex(
++            language="en",
++            locale="en-US",
++            profiles=(
++                profile("wʌg", "a small bird used in an aviary", "bird"),
++                profile("wuːg", "a bend or curve in a road", "bend"),
++            ),
++        )
++    )
++
++
++def test_context_selects_reading_with_matching_gloss_evidence():
++    text = "The wug flew into the aviary."
++    start = text.index("wug")
++    result = make_resolver().resolve(
++        text,
++        start=start,
++        end=start + len("wug"),
++        pos="noun",
++        lemma="wug",
++    )
++
++    assert result is not None
++    assert result.reading_id == "bird"
++    assert result.ipa == ("wʌg",)
++    assert result.selector == "READING:bird"
++    assert "aviary" in result.evidence_terms
++
++
++def test_weak_or_missing_context_returns_none():
++    text = "The wug is here."
++    start = text.index("wug")
++    result = make_resolver().resolve(
++        text,
++        start=start,
++        end=start + len("wug"),
++        pos="NOUN",
++        lemma="wug",
++    )
++    assert result is None
++
++
++def test_missing_pos_with_multiple_pos_groups_returns_none():
++    index = AmbiguityIndex(
++        language="en",
++        locale=None,
++        profiles=(
++            profile("wʌg", "a small bird", "noun-a"),
++            profile("wuːg", "a bend in a road", "noun-b"),
++            ReadingProfile(
++                word="wug",
++                pos="VERB",
++                reading_id="verb-a",
++                ipa=("wʌg",),
++                glosses=("to move quickly",),
++            ),
++            ReadingProfile(
++                word="wug",
++                pos="VERB",
++                reading_id="verb-b",
++                ipa=("wuːg",),
++                glosses=("to curve around",),
++            ),
++        ),
++    )
++    text = "The wug flew into the aviary."
++    start = text.index("wug")
++    assert Resolver(index).resolve(text, start=start, end=start + 3, lemma="wug") is None
++
++
++def test_bad_offsets_return_none():
++    text = "The wug flew."
++    assert make_resolver().resolve(text, start=-1, end=2, lemma="wug") is None
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+new file mode 100644
+index 0000000..df40b7e
+--- /dev/null
++++ b/tests/test_storage.py
+@@ -0,0 +1,39 @@
++import json
++
++import pytest
++
++from pronresolve import AmbiguityIndex, ReadingProfile, Resolver, load_index, save_index
++
++
++def test_index_round_trip_and_resolver_path(tmp_path):
++    index = AmbiguityIndex(
++        language="en",
++        locale="en-US",
++        profiles=(
++            ReadingProfile(
++                word="wug",
++                pos="NOUN",
++                reading_id="r1-en-example",
++                ipa=("wʌg",),
++                glosses=("a bird",),
++            ),
++            ReadingProfile(
++                word="wug",
++                pos="NOUN",
++                reading_id="r1-en-example2",
++                ipa=("wuːg",),
++                glosses=("a bend",),
++            ),
++        ),
++    )
++    path = save_index(index, tmp_path / "index.json")
++    loaded = load_index(path)
++    assert loaded == index
++    assert Resolver.from_path(path).index == index
++
++
++def test_unknown_schema_is_rejected(tmp_path):
++    path = tmp_path / "bad.json"
++    path.write_text(json.dumps({"schema_version": 99, "profiles": []}), encoding="utf-8")
++    with pytest.raises(ValueError, match="unsupported ambiguity index schema"):
++        load_index(path)
