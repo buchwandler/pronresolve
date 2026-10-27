@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "setuptools-scm[toml]>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pronresolve"
+dynamic = ["version"]
+description = "Data-driven pronunciation ambiguity discovery and context resolution"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Lexicon g2p contributors" }]
+keywords = ["pronunciation", "heteronyms", "g2p", "lexicon", "phonemization"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Text Processing :: Linguistic",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "build>=1", "mypy>=1.11", "ruff>=0.6"]
+
+[project.scripts]
+pronresolve = "pronresolve.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pronresolve*"]
+exclude = ["tests*", "implementation-briefs*"]
+
+[tool.setuptools_scm]
+version_file = "pronresolve/_version.py"
+fallback_version = "0.1.0.dev0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
