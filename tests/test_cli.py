@@ -224,3 +224,126 @@ def test_module_help_smoke():
     )
     assert result.returncode == 0
     assert "usage: pronresolve" in result.stdout.lower()
+
+
+def test_build_phonodist_writes_structural_audit_and_report(tmp_path, capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    import pronresolve.cli as cli
+
+    created = {}
+
+    class FakePhonodistEquivalence:
+        def __init__(self, *, language, stress_policy):
+            created["configuration"] = (language, stress_policy)
+
+        def evaluate(self, left, right):
+            comparison = SimpleNamespace(
+                segmental=SimpleNamespace(distance=0.05, operations=()),
+                classification="segmental",
+                stress_operations=(),
+            )
+            return False, comparison
+
+    monkeypatch.setattr(cli, "PhonodistEquivalence", FakePhonodistEquivalence)
+    source = tmp_path / "entries.jsonl"
+    source.write_text(
+        "\n".join(json.dumps(_entry(ipa, ipa)) for ipa in ("liːd", "lɛd")) + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "index.json"
+    audit_path = tmp_path / "audit.json"
+
+    status, output = _run_cli(
+        capsys,
+        [
+            "build",
+            "--input-jsonl",
+            str(source),
+            "--output",
+            str(output_path),
+            "--language",
+            "de-DE",
+            "--pronunciation-equivalence",
+            "phonodist",
+            "--stress-policy",
+            "primary",
+            "--audit-output",
+            str(audit_path),
+        ],
+    )
+
+    assert status == 0
+    assert created["configuration"] == ("de-DE", "primary")
+    assert len(json.loads(output.out)["equivalence_audit"]) > 0
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit[0]["classification"] == "segmental"
+    assert audit[0]["distance"] == 0.05
+    report = json.loads((tmp_path / "index.json.report.json").read_text(encoding="utf-8"))
+    assert report["equivalence_comparisons"] == 1
+
+
+def test_strict_phonodist_build_records_errors_and_fails_without_index(
+    tmp_path, capsys, monkeypatch
+):
+    import pronresolve.cli as cli
+
+    class BrokenPhonodistEquivalence:
+        def __init__(self, *, language, stress_policy):
+            pass
+
+        def evaluate(self, left, right):
+            raise ValueError("unsupported segment")
+
+        def equivalent(self, left, right):
+            raise ValueError("unsupported segment")
+
+    monkeypatch.setattr(cli, "PhonodistEquivalence", BrokenPhonodistEquivalence)
+    source = tmp_path / "entries.jsonl"
+    source.write_text(
+        "\n".join(json.dumps(_entry(ipa, ipa)) for ipa in ("liːd", "lɛd")) + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "index.json"
+
+    status, output = _run_cli(
+        capsys,
+        [
+            "build",
+            "--input-jsonl",
+            str(source),
+            "--output",
+            str(output_path),
+            "--language",
+            "de-DE",
+            "--pronunciation-equivalence",
+            "phonodist",
+            "--strict-equivalence",
+        ],
+    )
+
+    assert status == 2
+    assert "comparison errors occurred: 1" in output.err
+    assert not output_path.exists()
+    report = json.loads((tmp_path / "index.json.report.json").read_text(encoding="utf-8"))
+    assert report["equivalence_errors"] == 1
+
+
+def test_audit_output_requires_phonodist_mode(tmp_path, capsys):
+    status, output = _run_cli(
+        capsys,
+        [
+            "build",
+            "--input-jsonl",
+            str(tmp_path / "absent.jsonl"),
+            "--output",
+            str(tmp_path / "index.json"),
+            "--language",
+            "en",
+            "--audit-output",
+            str(tmp_path / "audit.json"),
+        ],
+    )
+
+    assert status == 2
+    assert "requires --pronunciation-equivalence phonodist" in output.err

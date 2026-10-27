@@ -21,6 +21,22 @@ The current CI matrix verifies Python 3.10–3.13; Python 3.14 has not yet been 
 
 ## Concept and discovery
 
+### Optional build-time pronunciation equivalence
+
+Exact normalized IPA comparison remains the default. Pronunciation values with no segment-like Unicode letter (including punctuation-only placeholders such as `…`) are rejected unconditionally; this screening is not a full IPA validator.
+
+Install the optional structural comparator only when building with phonodist equivalence:
+
+```bash
+python -m pip install "pronresolve[phonetic]"
+pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
+  --pronunciation-equivalence phonodist --stress-policy all \\
+  --strict-equivalence --audit-output de-equivalence-audit.json
+```
+
+Phonodist mode compares structure rather than treating a zero feature distance as identity. `all` preserves primary and secondary stress (the default); `primary` still preserves primary stress but may ignore secondary-stress differences. Discovery suppresses a candidate group only when every exact-IPA pair is equivalent. Otherwise it keeps the original IPA candidates and reading IDs; unsupported comparisons fail closed and are counted. Only exact structure and the explicitly allowlisted zero-cost German affricate-notation rule can be equivalent.
+
+The sibling `.report.json` records `invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, and `equivalence_errors`. `--strict-equivalence` aborts if any comparison errors occur. The optional audit is a separate, sorted JSON file containing structural details for remaining ambiguity pairs; it does not change the runtime index or make distance-based decisions. Phonodist is loaded only for this explicit build-time mode: runtime consumers remain dependency-free and the runtime schema stays v2.
 The build pipeline streams dictionary-entry mappings or objects into `discover_ambiguities()`. The package groups by normalized spelling and POS, normalizes pronunciations, and generates stable reading IDs.
 
 ```python

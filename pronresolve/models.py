@@ -7,7 +7,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .normalization import normalize_ipa, normalize_pos, normalize_word, tokens
+from .normalization import (
+    _is_pronunciation_candidate,
+    normalize_ipa,
+    normalize_pos,
+    normalize_word,
+    tokens,
+)
 
 INDEX_SCHEMA_VERSION = 2
 
@@ -95,6 +101,8 @@ class ReadingProfile:
         ipa = normalize_ipa(self.ipa)
         if not ipa:
             raise ValueError("profile.ipa must be a non-empty scalar string")
+        if not _is_pronunciation_candidate(ipa):
+            raise ValueError("profile.ipa must contain a segment-like Unicode letter")
         if not isinstance(self.sense_ids, tuple) or any(
             not isinstance(item, str) for item in self.sense_ids
         ):
@@ -295,6 +303,11 @@ class DiscoveryReport:
     entries_without_pos: int = 0
     unlinked_keys: tuple[str, ...] = ()
 
+    invalid_pronunciation_values: int = 0
+    equivalent_pronunciation_keys: int = 0
+    equivalence_comparisons: int = 0
+    equivalence_errors: int = 0
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "entries_scanned": self.entries_scanned,
@@ -306,6 +319,10 @@ class DiscoveryReport:
             "entries_without_pronunciation": self.entries_without_pronunciation,
             "entries_without_pos": self.entries_without_pos,
             "unlinked_keys": list(self.unlinked_keys),
+            "invalid_pronunciation_values": self.invalid_pronunciation_values,
+            "equivalent_pronunciation_keys": self.equivalent_pronunciation_keys,
+            "equivalence_comparisons": self.equivalence_comparisons,
+            "equivalence_errors": self.equivalence_errors,
         }
 
 
@@ -313,6 +330,7 @@ class DiscoveryReport:
 class DiscoveryResult:
     index: AmbiguityIndex
     report: DiscoveryReport
+    equivalence_audit: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -83,6 +83,14 @@ def normalize_ipa(value: str) -> str:
     return normalized.strip()
 
 
+def _is_pronunciation_candidate(value: str) -> bool:
+    """Return whether normalized text contains at least one Unicode letter.
+
+    This deliberately screens obvious placeholders; it is not an IPA validator.
+    """
+    return any(unicodedata.category(char).startswith("L") for char in value)
+
+
 def tokens(value: str) -> tuple[str, ...]:
     return tuple(normalize_word(value[start:end]) for start, end in _word_ranges(value or ""))
 

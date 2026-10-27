@@ -19,6 +19,22 @@ The package separates offline discovery from runtime resolution. Discovery safel
 
 ## Discovery pipeline
 
+## Optional build-time pronunciation equivalence
+
+`discover_ambiguities()` and `pronresolve build` use exact normalized IPA identity by default. Invalid pronunciation values with no segment-like Unicode letter are rejected independently of this option; this is a minimal placeholder screen, not full IPA validation.
+
+For conservative structural comparison, install the optional dependency and select phonodist explicitly:
+
+```bash
+python -m pip install "pronresolve[phonetic]"
+pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
+  --pronunciation-equivalence phonodist --stress-policy all \\
+  --strict-equivalence --audit-output de-equivalence-audit.json
+```
+
+The `all` stress policy (default) preserves primary and secondary stress. `primary` may ignore secondary stress, but never primary stress. Suppression is all-or-nothing: every pair of exact-IPA candidates must be equivalent or all original candidates and reading IDs remain. Comparisons fail closed when unsupported, and only exact structure or the allowlisted zero-cost German affricate-notation operation can be accepted; a zero feature distance alone is not an equivalence decision.
+
+The build report adds placeholder and comparison counters (`invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, `equivalence_errors`). `--strict-equivalence` fails the build on comparison errors. `--audit-output` writes separate, sorted structural details for remaining ambiguity pairs; it does not affect candidate selection or runtime JSON. The optional phonodist import is build-time only. Runtime consumers retain the dependency-free schema-v2 contract.
 Call `discover_ambiguities(entries, language="en", locale="en-US")` with a reusable iterable or streaming iterator of mapping- or object-shaped entries. Entries with missing/empty POS are excluded from automatic resolution and reported in `DiscoveryReport.entries_without_pos`. Missing pronunciation is counted separately. If one source entry contains multiple distinct IPA values, its senses cannot safely be linked to an individual IPA, so the key is reported as unlinked rather than guessed.
 
 ## Runtime resolution

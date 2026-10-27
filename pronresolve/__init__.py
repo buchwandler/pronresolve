@@ -6,6 +6,12 @@ except ImportError:  # Source checkout before setuptools-scm has generated _vers
     __version__ = "0+unknown"
 
 from .discovery import discover_ambiguities, reading_id_for
+from .equivalence import (
+    EquivalenceConfigurationError,
+    ExactEquivalence,
+    PhonodistEquivalence,
+    PronunciationEquivalence,
+)
 from .models import (
     AmbiguityIndex,
     Cue,
@@ -23,6 +29,10 @@ __all__ = [
     "AmbiguityIndex",
     "CandidateScore",
     "Cue",
+    "EquivalenceConfigurationError",
+    "ExactEquivalence",
+    "PhonodistEquivalence",
+    "PronunciationEquivalence",
     "DiscoveryReport",
     "DiscoveryResult",
     "ReadingProfile",

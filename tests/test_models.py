@@ -55,3 +55,10 @@ def test_runtime_model_rejects_non_scalar_ipa_and_duplicate_cues():
     value["entries"]["read"]["VERB"][0]["ipa"] = ["ɹiːd"]
     with pytest.raises(ValueError, match="ipa must be a non-empty string"):
         AmbiguityIndex.from_dict(value)
+
+
+def test_runtime_model_rejects_punctuation_only_ipa():
+    from pronresolve.models import ReadingProfile
+
+    with pytest.raises(ValueError, match="segment-like Unicode letter"):
+        ReadingProfile(word="ellipsis", pos="noun", reading_id="r1", ipa="…")
