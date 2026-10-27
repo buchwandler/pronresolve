@@ -10,6 +10,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .compile import compile_cues
 from .models import AmbiguityIndex, DiscoveryReport, DiscoveryResult, ReadingProfile
 from .normalization import normalize_ipa, normalize_pos, normalize_word
 
@@ -216,15 +217,9 @@ def discover_ambiguities(
                     word=display_word,
                     pos=pos,
                     reading_id=reading_id_for(language, normalized_word, pos, ipa),
-                    ipa=(ipa,),
+                    ipa=ipa,
                     sense_ids=unique["sense_ids"],
-                    etymology_numbers=unique["etymology_numbers"],
-                    glosses=unique["glosses"],
-                    topics=unique["topics"],
-                    tags=unique["tags"],
-                    examples=unique["examples"],
-                    synonyms=unique["synonyms"],
-                    antonyms=unique["antonyms"],
+                    cues=compile_cues(unique),
                 )
             )
 

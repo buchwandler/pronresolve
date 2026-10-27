@@ -8,17 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .models import AmbiguityIndex, CandidateScore, ReadingProfile, Resolution
-from .normalization import STOPWORDS, normalize_pos, normalize_word, token_spans, tokens
+from .normalization import STOPWORDS, normalize_pos, normalize_word, token_spans
 from .storage import load_index
-
-_FIELD_WEIGHTS = {
-    "glosses": 3.0,
-    "synonyms": 3.5,
-    "topics": 2.5,
-    "examples": 2.0,
-    "tags": 1.0,
-    "antonyms": 0.75,
-}
 
 
 class Resolver:
@@ -36,10 +27,20 @@ class Resolver:
             raise ValueError("min_score and min_margin must be non-negative")
         self.min_score = float(min_score)
         self.min_margin = float(min_margin)
-        by_word: dict[str, list[ReadingProfile]] = defaultdict(list)
+        by_word: dict[str, dict[str, list[ReadingProfile]]] = defaultdict(lambda: defaultdict(list))
+        self._cue_maps: dict[str, dict[str, float]] = {}
         for profile in self.index.profiles:
-            by_word[normalize_word(profile.word)].append(profile)
-        self._by_word = dict(by_word)
+            word = normalize_word(profile.word)
+            pos = normalize_pos(profile.pos)
+            by_word[word][pos].append(profile)
+            self._cue_maps[profile.reading_id] = {cue.token: cue.weight for cue in profile.cues}
+        self._by_word = {
+            word: {
+                pos: tuple(sorted(profiles, key=lambda profile: profile.reading_id))
+                for pos, profiles in groups.items()
+            }
+            for word, groups in by_word.items()
+        }
 
     @classmethod
     def from_path(
@@ -79,19 +80,15 @@ class Resolver:
         if not word:
             return None
 
-        profiles = self._by_word.get(word, [])
-        if not profiles:
+        pos_groups = self._by_word.get(word)
+        if not pos_groups:
             return None
-
         if pos is not None:
-            normalized_pos = normalize_pos(pos)
-            profiles = [
-                profile for profile in profiles if normalize_pos(profile.pos) == normalized_pos
-            ]
+            profiles = pos_groups.get(normalize_pos(pos), ())
         else:
-            pos_groups = {normalize_pos(profile.pos) for profile in profiles}
             if len(pos_groups) != 1:
                 return None
+            profiles = next(iter(pos_groups.values()))
         if len(profiles) < 2:
             return None
 
@@ -118,26 +115,11 @@ class Resolver:
         scored: list[CandidateScore] = []
         profile_by_id = {profile.reading_id: profile for profile in profiles}
         for profile in profiles:
-            field_tokens = {
-                field_name: {
-                    token
-                    for value in getattr(profile, field_name)
-                    for token in tokens(value)
-                    if token not in STOPWORDS
-                }
-                for field_name in _FIELD_WEIGHTS
-            }
+            candidate_cues = self._cue_maps[profile.reading_id]
             score = 0.0
             matched: list[str] = []
             for term, distance in cue_distances.items():
-                matching_weight = max(
-                    (
-                        weight
-                        for field_name, weight in _FIELD_WEIGHTS.items()
-                        if term in field_tokens[field_name]
-                    ),
-                    default=0.0,
-                )
+                matching_weight = candidate_cues.get(term, 0.0)
                 if matching_weight:
                     # Adjacent evidence is strongest; distant cues still contribute.
                     distance_factor = 1.0 / (1.0 + 0.15 * max(distance - 1, 0))

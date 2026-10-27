@@ -60,24 +60,35 @@ A `None` result means the existing default pronunciation path should remain in u
 ```bash
 pronresolve --help
 pronresolve build --input-jsonl entries.jsonl --output index.json --language en --locale en-US
-pronresolve inspect index.json
+pronresolve inspect index.json [--word WORD]
 pronresolve validate index.json
 ```
 
-`build` reads one JSON object per non-empty JSONL line and writes an index plus `<output>.report.json`. `inspect` and `validate` print a summary. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
+`build` reads one JSON object per non-empty JSONL line and writes a compact v2 index plus `<output>.report.json`. `inspect` prints summary counts; add `--word WORD` to view each reading's IPA, sense IDs, and weighted cues. `validate` accepts v1 and v2. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
 
-## JSON index schema
+## What pronresolve stores
 
-Schema version 1 is a JSON object with required root fields:
+The resolver index is a compact decision artifact, not a copy of dictionary records. Schema v2 groups candidates by normalized word and POS. Each runtime reading profile contains a reading ID, scalar IPA, sense IDs, and normalized cue tokens grouped by weight. Raw gloss, synonym, topic, tag, antonym, example, and etymology prose is not stored in runtime profiles.
 
-- `schema_version`: integer exactly `1`;
-- `language`: non-empty string;
-- `locale`: string or `null`;
-- `profiles`: array of profile objects.
+### Policy B runtime scoring
 
-Every profile requires non-empty string `word`, `pos`, and `reading_id`, plus a non-empty `ipa` array of non-empty strings. Optional evidence arrays (`sense_ids`, `etymology_numbers`, `glosses`, `topics`, `tags`, `examples`, `synonyms`, `antonyms`) contain strings. Unknown fields are ignored for forward-compatible readers; unsupported schema versions are rejected. Malformed structures are rejected rather than coerced.
+| Evidence field | Weight |
+| -------------- | -----: |
+| Synonyms       |    3.5 |
+| Glosses        |    3.0 |
+| Topics         |    2.5 |
+| Tags           |    1.0 |
+| Antonyms       |   0.75 |
 
-Dataset/version identity belongs to the containing lexicon data package or artifact metadata, not to the v1 index JSON. Publish the index alongside the matching pronunciation lexicon and keep their dataset versions aligned.
+Examples are excluded from runtime scoring and serialized cues. They are disproportionately large, can contain incidental words unrelated to sense identity, and are unnecessary for compact lexical matching; they may still be retained privately as build/audit evidence. Repeated cue tokens keep their maximum field weight rather than adding weights. Antonyms retain positive-association behavior for parity; signed or removed antonym evidence is deferred.
+
+### Schema compatibility
+
+New indexes are written as compact, deterministic schema v2 JSON. The loader also accepts schema v1, compiles its synonyms, glosses, topics, tags, and antonyms into Policy B cues, and deliberately ignores examples and etymology numbers for runtime resolution. Therefore v1 scores are not guaranteed to match the previous resolver when examples contributed evidence.
+
+The runtime `ReadingProfile` API intentionally changed: IPA is scalar and lexical evidence is exposed as compiled `Cue` values instead of raw prose fields. `Resolution.ipa` is also scalar. Callers should use the returned `sense_ids`, `evidence_terms`, and reading ID for runtime explanation and selection.
+
+Schema-v2 JSON uses `schema_version`, `language`, `locale`, and an `entries` object grouped as `word -> POS -> candidates`; each candidate stores `id`, scalar `ipa`, optional `sense_ids`, and `cues` grouped by weight. Unsupported versions and malformed structures are rejected. Dataset/version identity belongs to the containing lexicon package or artifact metadata, not the index JSON; publish the index beside its matching pronunciation lexicon.
 
 ## Integration boundary
 

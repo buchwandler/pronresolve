@@ -2,11 +2,55 @@
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from dataclasses import dataclass
 
-_WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
+
+def _is_word_base(char: str) -> bool:
+    return char != "_" and char.isalnum()
+
+
+def _consume_marks(value: str, position: int) -> int:
+    while position < len(value) and unicodedata.category(value[position]).startswith("M"):
+        position += 1
+    return position
+
+
+def _consume_word(value: str, position: int) -> int:
+    position += 1
+    position = _consume_marks(value, position)
+    used_apostrophe = False
+    while position < len(value):
+        if _is_word_base(value[position]):
+            position += 1
+            position = _consume_marks(value, position)
+        elif (
+            not used_apostrophe
+            and value[position] in "'’"
+            and position + 1 < len(value)
+            and _is_word_base(value[position + 1])
+        ):
+            used_apostrophe = True
+            position += 1
+            position += 1
+            position = _consume_marks(value, position)
+        else:
+            break
+    return position
+
+
+def _word_ranges(value: str) -> tuple[tuple[int, int], ...]:
+    result: list[tuple[int, int]] = []
+    position = 0
+    while position < len(value):
+        if not _is_word_base(value[position]):
+            position += 1
+            continue
+        start = position
+        position = _consume_word(value, position)
+        result.append((start, position))
+    return tuple(result)
+
 
 # Generic function words only; this is not a word- or heteronym-specific list.
 STOPWORDS = frozenset(
@@ -40,7 +84,7 @@ def normalize_ipa(value: str) -> str:
 
 
 def tokens(value: str) -> tuple[str, ...]:
-    return tuple(normalize_word(match.group(0)) for match in _WORD_RE.finditer(value or ""))
+    return tuple(normalize_word(value[start:end]) for start, end in _word_ranges(value or ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +96,13 @@ class TokenSpan:
 
 
 def token_spans(value: str) -> tuple[TokenSpan, ...]:
+    text = value or ""
     return tuple(
         TokenSpan(
-            text=match.group(0),
-            normalized=normalize_word(match.group(0)),
-            start=match.start(),
-            end=match.end(),
+            text=text[start:end],
+            normalized=normalize_word(text[start:end]),
+            start=start,
+            end=end,
         )
-        for match in _WORD_RE.finditer(value or "")
+        for start, end in _word_ranges(text)
     )

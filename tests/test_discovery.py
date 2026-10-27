@@ -34,8 +34,27 @@ def test_discovers_different_ipa_for_same_word_and_pos():
     assert len(result.index.profiles) == 2
     assert result.report.resolvable_keys == 1
     assert result.report.unlinked_ambiguity_keys == 0
-    assert {profile.ipa[0] for profile in result.index.profiles} == {"wʌg", "wuːg"}
+    assert {profile.ipa for profile in result.index.profiles} == {"wʌg", "wuːg"}
     assert {profile.word.casefold() for profile in result.index.profiles} == {"wug"}
+
+
+def test_discovery_compiles_cues_without_examples_or_raw_runtime_evidence():
+    rows = [
+        entry("lead", "verb", "liːd", "to guide", "guide"),
+        entry("lead", "verb", "lɛd", "a metallic element", "metal"),
+    ]
+    rows[0]["senses"][0]["examples"] = ["quizzicalexamplecue"]
+    result = discover_ambiguities(rows, language="en")
+
+    profiles = result.index.profiles
+    assert len(profiles) == 2
+    assert all(profile.ipa in {"liːd", "lɛd"} for profile in profiles)
+    assert all(not hasattr(profile, "examples") for profile in profiles)
+    assert all(not hasattr(profile, "glosses") for profile in profiles)
+    assert all("quizzicalexamplecue" not in {cue.token for cue in p.cues} for p in profiles)
+    assert all(profile.sense_ids for profile in profiles)
+    for candidates in result.index.to_dict()["entries"]["lead"]["VERB"]:
+        assert set(candidates) == {"id", "ipa", "sense_ids", "cues"}
 
 
 def test_same_entry_with_two_ipa_is_reported_but_not_guessed():

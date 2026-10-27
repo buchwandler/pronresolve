@@ -1,14 +1,17 @@
-from pronresolve import AmbiguityIndex, ReadingProfile, Resolver
+from pronresolve import AmbiguityIndex, Resolver
+from pronresolve.models import Cue, ReadingProfile
+from pronresolve.normalization import STOPWORDS, normalize_word, token_spans
+from pronresolve.storage import decode_v1
 
 
-def profile(ipa, gloss, reading_id):
+def profile(ipa, cues, reading_id, *, pos="NOUN"):
     return ReadingProfile(
         word="wug",
-        pos="NOUN",
+        pos=pos,
         reading_id=reading_id,
-        ipa=(ipa,),
+        ipa=ipa,
         sense_ids=(f"sense-{reading_id}",),
-        glosses=(gloss,),
+        cues=tuple(Cue(token, weight) for token, weight in cues.items()),
     )
 
 
@@ -18,17 +21,18 @@ def make_resolver():
             language="en",
             locale="en-US",
             profiles=(
-                profile("wʌg", "a small bird used in an aviary", "bird"),
-                profile("wuːg", "a bend or curve in a road", "bend"),
+                profile("wʌg", {"aviary": 3.0}, "bird"),
+                profile("wuːg", {"road": 3.0}, "bend"),
             ),
         )
     )
 
 
-def test_context_selects_reading_with_matching_gloss_evidence():
+def test_context_selects_reading_with_precompiled_cues_and_matched_terms():
     text = "The wug flew into the aviary."
     start = text.index("wug")
-    result = make_resolver().resolve(
+    resolver = make_resolver()
+    result = resolver.resolve(
         text,
         start=start,
         end=start + len("wug"),
@@ -38,9 +42,11 @@ def test_context_selects_reading_with_matching_gloss_evidence():
 
     assert result is not None
     assert result.reading_id == "bird"
-    assert result.ipa == ("wʌg",)
+    assert result.ipa == "wʌg"
     assert result.selector == "READING:bird"
-    assert "aviary" in result.evidence_terms
+    assert result.sense_ids == ("sense-bird",)
+    assert result.evidence_terms == ("aviary",)
+    assert resolver._cue_maps["bird"] == {"aviary": 3.0}
 
 
 def test_weak_or_missing_context_returns_none():
@@ -61,35 +67,23 @@ def test_missing_pos_with_multiple_pos_groups_returns_none():
         language="en",
         locale=None,
         profiles=(
-            profile("wʌg", "a small bird", "noun-a"),
-            profile("wuːg", "a bend in a road", "noun-b"),
-            ReadingProfile(
-                word="wug",
-                pos="VERB",
-                reading_id="verb-a",
-                ipa=("wʌg",),
-                glosses=("to move quickly",),
-            ),
-            ReadingProfile(
-                word="wug",
-                pos="VERB",
-                reading_id="verb-b",
-                ipa=("wuːg",),
-                glosses=("to curve around",),
-            ),
+            profile("wʌg", {"aviary": 3.0}, "noun-a"),
+            profile("wuːg", {"road": 3.0}, "noun-b"),
+            profile("wʌg", {"quickly": 3.0}, "verb-a", pos="VERB"),
+            profile("wuːg", {"curve": 3.0}, "verb-b", pos="VERB"),
         ),
     )
     text = "The wug flew into the aviary."
-    start = text.index("wug")
-    assert Resolver(index).resolve(text, start=start, end=start + 3, lemma="wug") is None
+    assert Resolver(index).resolve(text, start=4, end=7, lemma="wug") is None
 
 
 def test_bad_offsets_return_none():
     text = "The wug flew."
     assert make_resolver().resolve(text, start=-1, end=2, lemma="wug") is None
+    assert make_resolver().resolve(text, start=5, end=4, lemma="wug") is None
 
 
-def test_thresholds_ties_unknown_and_weak_context_abstain():
+def test_thresholds_ties_unknown_words_and_wrong_pos_abstain():
     resolver = make_resolver()
     text = "The wug flew into the aviary."
     start = text.index("wug")
@@ -98,62 +92,65 @@ def test_thresholds_ties_unknown_and_weak_context_abstain():
     assert Resolver(resolver.index, min_margin=100).resolve(text, **args) is None
     assert resolver.resolve("The wug is here.", start=4, end=7, pos="NOUN", lemma="wug") is None
     assert resolver.resolve("The unknown flew into the aviary.", start=4, end=11) is None
+    assert resolver.resolve("wug aviary", start=0, end=3, pos="ADJ", lemma="wug") is None
 
 
-def test_tied_candidates_abstain_and_three_candidates_are_supported():
-    index = make_resolver().index
+def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
     tied = AmbiguityIndex(
         language="en",
         locale=None,
         profiles=(
-            profile("a", "shared aviary", "a"),
-            profile("b", "shared aviary", "b"),
+            profile("a", {"shared": 3.0}, "a"),
+            profile("b", {"shared": 3.0}, "b"),
         ),
     )
     assert Resolver(tied).resolve("wug shared", start=0, end=3, pos="NOUN", lemma="wug") is None
+
+    single = AmbiguityIndex(
+        language="en",
+        locale=None,
+        profiles=(profile("a", {"shared": 3.0}, "only"),),
+    )
+    assert Resolver(single).resolve("wug shared", start=0, end=3, pos="NOUN", lemma="wug") is None
+
     three = AmbiguityIndex(
-        language=index.language,
-        locale=index.locale,
-        profiles=(*index.profiles, profile("wʊg", "a nest", "nest")),
+        language="en",
+        locale=None,
+        profiles=(
+            profile("a", {"aviary": 3.0}, "a"),
+            profile("b", {"road": 3.0}, "b"),
+            profile("c", {"nest": 3.0}, "nest"),
+        ),
     )
-    assert (
-        Resolver(three).resolve("wug aviary", start=0, end=3, pos="NOUN", lemma="wug") is not None
-    )
+    result = Resolver(three).resolve("wug aviary", start=0, end=3, pos="NOUN", lemma="wug")
+    assert result is not None
 
 
-def test_pos_filter_and_unicode_casefold_resolution():
+def test_pos_filter_unicode_casefold_and_token_adapter():
     resolver = make_resolver()
-    assert resolver.resolve("wug aviary", start=0, end=3, pos="ADJ", lemma="wug") is None
-    assert (
-        resolver.resolve("WUG AVIARY", start=0, end=3, pos="noun", lemma="WUG").reading_id == "bird"
-    )
+    result = resolver.resolve("WUG AVIARY", start=0, end=3, pos="noun", lemma="WUG")
+    assert result is not None and result.reading_id == "bird"
 
-
-def test_resolve_token_mapping_and_spacy_like_object():
-    resolver = make_resolver()
-    text = "The wug flew into the aviary."
-    start = text.index("wug")
-    mapping = {"start_char": start, "text": "wug", "pos": "NOUN", "lemma": "wug"}
-    assert resolver.resolve_token(text, mapping).reading_id == "bird"
+    mapping = {"start_char": 4, "text": "wug", "pos": "NOUN", "lemma": "wug"}
+    assert resolver.resolve_token("The wug flew into the aviary.", mapping).reading_id == "bird"
 
     class Token:
         pass
 
-    Token.idx = start
+    Token.idx = 4
     Token.text = "wug"
     Token.lemma_ = "wug"
     Token.pos_ = "NOUN"
+    assert resolver.resolve_token("The wug flew into the aviary.", Token()).reading_id == "bird"
 
-    assert resolver.resolve_token(text, Token()).reading_id == "bird"
 
-
-def test_equal_score_candidates_are_ordered_by_reading_id():
+def test_equal_scores_are_ordered_by_reading_id_and_report_matched_cues():
     tied = AmbiguityIndex(
         language="en",
         locale=None,
         profiles=(
-            profile("a", "shared aviary", "z-reading"),
-            profile("b", "shared aviary", "a-reading"),
+            profile("a", {"shared": 3.0}, "z-reading"),
+            profile("b", {"shared": 3.0}, "a-reading"),
         ),
     )
     result = Resolver(tied, min_margin=0).resolve(
@@ -162,25 +159,85 @@ def test_equal_score_candidates_are_ordered_by_reading_id():
     assert result is not None
     assert [candidate.reading_id for candidate in result.candidates] == ["a-reading", "z-reading"]
     assert result.reading_id == "a-reading"
+    assert result.evidence_terms == ("shared",)
 
 
-def test_context_evidence_in_multiple_fields_counts_once_at_strongest_weight():
-    base = profile("a", "aviary", "a")
-    enriched = ReadingProfile(
-        word=base.word,
-        pos=base.pos,
-        reading_id=base.reading_id,
-        ipa=base.ipa,
-        glosses=base.glosses,
-        synonyms=("aviary",),
+def test_example_only_context_has_no_compiled_score():
+    index = AmbiguityIndex(
+        language="en",
+        locale=None,
+        profiles=(
+            profile("a", {"aviary": 3.0}, "a"),
+            profile("b", {"road": 3.0}, "b"),
+        ),
     )
-    other = profile("b", "road", "b")
-    plain = Resolver(AmbiguityIndex("en", None, (base, other))).resolve(
-        "wug aviary", start=0, end=3, pos="NOUN", lemma="wug"
+    text = "wug quizzicalexamplecue"
+    assert Resolver(index).resolve(text, start=0, end=3, pos="NOUN", lemma="wug") is None
+
+
+def _policy_b_reference_score(profile, text, start, end):
+    spans = token_spans(text)
+    target_word = normalize_word(text[start:end])
+    target_index = next(
+        (index for index, span in enumerate(spans) if span.start < end and span.end > start),
+        sum(1 for span in spans if span.end <= start),
     )
-    rich = Resolver(AmbiguityIndex("en", None, (enriched, other))).resolve(
-        "wug aviary", start=0, end=3, pos="NOUN", lemma="wug"
+    nearest = {}
+    for index, span in enumerate(spans):
+        if span.start < end and span.end > start:
+            continue
+        if span.normalized in STOPWORDS or span.normalized == target_word:
+            continue
+        distance = abs(index - target_index)
+        nearest[span.normalized] = min(nearest.get(span.normalized, distance), distance)
+    cue_weights = {cue.token: cue.weight for cue in profile.cues}
+    score = sum(
+        cue_weights.get(token, 0.0) / (1.0 + 0.15 * max(distance - 1, 0))
+        for token, distance in nearest.items()
     )
-    assert plain is not None and rich is not None
-    assert rich.score > plain.score
-    assert rich.score < plain.score * 2
+    return round(score, 6)
+
+
+def test_v1_resolution_scores_match_policy_b_reference_not_legacy_examples():
+    legacy = {
+        "schema_version": 1,
+        "language": "en",
+        "locale": None,
+        "profiles": [
+            {
+                "word": "read",
+                "pos": "VERB",
+                "reading_id": "read-cue",
+                "ipa": ["ɹiːd"],
+                "sense_ids": ["s1"],
+                "synonyms": ["interpret"],
+                "glosses": ["comprehend"],
+                "topics": ["communication"],
+                "tags": ["transitive"],
+                "antonyms": ["ignore"],
+                "examples": ["exampleonlycue"],
+            },
+            {
+                "word": "read",
+                "pos": "VERB",
+                "reading_id": "read-other",
+                "ipa": ["ɹɛd"],
+                "sense_ids": ["s2"],
+                "glosses": ["unrelated"],
+            },
+        ],
+    }
+    index = decode_v1(legacy)
+    resolver = Resolver(index, min_score=0, min_margin=0)
+    text = "read interpret comprehend communication transitive ignore exampleonlycue"
+    result = resolver.resolve(text, start=0, end=4, pos="VERB", lemma="read")
+
+    assert result is not None
+    expected = {
+        profile.reading_id: _policy_b_reference_score(profile, text, 0, 4)
+        for profile in index.profiles
+    }
+    actual = {candidate.reading_id: candidate.score for candidate in result.candidates}
+    assert actual == expected
+    assert result.reading_id == "read-cue"
+    assert "exampleonlycue" not in result.evidence_terms
