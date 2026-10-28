@@ -52,7 +52,7 @@ class PhonodistEquivalence:
         if self.stress_policy not in ("all", "primary"):
             raise ValueError("stress_policy must be 'all' or 'primary'")
         try:
-            from phonodist import compare_pronunciations, get_profile
+            from phonodist import compare_pronunciations, get_profile  # type: ignore[import-not-found]
         except ImportError as exc:
             raise EquivalenceConfigurationError(
                 "phonodist equivalence requires the optional 'phonetic' extra"

@@ -239,6 +239,8 @@ def _parse_semantic_anchor(value: Any) -> SemanticAnchor:
         raise ValueError("semantic_anchor must be an object with namespace and keys")
     namespace = value.get("namespace")
     keys = value.get("keys")
+    if not isinstance(namespace, str):
+        raise ValueError("semantic_anchor.namespace must be a string")
     if not isinstance(keys, (list, tuple)):
         raise ValueError("semantic_anchor.keys must be an array of strings")
     return SemanticAnchor(namespace, tuple(keys))
@@ -462,7 +464,7 @@ def discover_ambiguities(
             if include_equivalence_audit:
                 for pair in partition.pairwise_audit:
                     if pair.error is not None:
-                        record = {
+                        record: dict[str, Any] = {
                             "word": normalized_word,
                             "pos": pos,
                             "ipa_left": pair.left,
