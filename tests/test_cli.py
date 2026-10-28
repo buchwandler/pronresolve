@@ -34,21 +34,43 @@ def test_build_inspect_validate_cli(tmp_path, capsys):
         encoding="utf-8",
     )
     index_path = tmp_path / "index.json"
+    identity_audit_path = tmp_path / "identity-audit.json"
     status, output = _run_cli(
         capsys,
-        ["build", "--input-jsonl", str(source), "--output", str(index_path), "--language", "en"],
+        [
+            "build",
+            "--input-jsonl",
+            str(source),
+            "--output",
+            str(index_path),
+            "--language",
+            "en",
+            "--rules-id",
+            "en-us",
+            "--identity-audit-output",
+            str(identity_audit_path),
+        ],
     )
     assert status == 0
-    assert json.loads(output.out)["schema_version"] == 2
+    assert json.loads(output.out)["schema_version"] == 3
     assert json.loads(output.out)["resolvable_keys"] == 1
     assert index_path.exists()
-    assert json.loads(index_path.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert json.loads(index_path.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert json.loads(index_path.read_text(encoding="utf-8"))["id_version"] == 2
+    assert json.loads(index_path.read_text(encoding="utf-8"))["rules_id"] == "en-us"
+    identity_records = json.loads(identity_audit_path.read_text(encoding="utf-8"))
+    assert len(identity_records) == 2
+    assert all(record["id"].startswith("r2-en-") for record in identity_records)
+    assert "semantic_anchor" in identity_records[0]
     report = tmp_path / "index.json.report.json"
     assert json.loads(report.read_text(encoding="utf-8"))["entries_scanned"] == 2
 
     assert main(["inspect", str(index_path)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["valid"] is True
+    assert summary["runtime_schema_version"] == 3
+    assert summary["id_version"] == 2
+    assert summary["rules_id"] == "en-us"
     assert summary["ambiguous_word_count"] == 1
     assert summary["word_pos_group_count"] == 1
     assert summary["profile_count"] == 2
@@ -61,11 +83,12 @@ def test_build_inspect_validate_cli(tmp_path, capsys):
     assert len(details["readings"]) == 2
     assert {reading["pos"] for reading in details["readings"]} == {"NOUN"}
     assert {reading["ipa"] for reading in details["readings"]} == {"liːd", "lɛd"}
-    assert all(reading["sense_ids"] for reading in details["readings"])
+    assert all(not reading["sense_ids"] for reading in details["readings"])
+    assert {reading["anchor_ipa"] for reading in details["readings"]} == {"liːd", "lɛd"}
     assert all(reading["weighted_cues"] for reading in details["readings"])
 
     assert main(["validate", str(index_path)]) == 0
-    assert json.loads(capsys.readouterr().out)["schema_version"] == 2
+    assert json.loads(capsys.readouterr().out)["schema_version"] == 3
 
 
 def test_validate_and_inspect_accept_v1_and_show_policy_b_runtime(tmp_path, capsys):
@@ -117,7 +140,7 @@ def test_validate_and_inspect_accept_v1_and_show_policy_b_runtime(tmp_path, caps
     assert "exampleonlycue" not in cues
 
 
-def test_policy_b_v2_serialization_is_at_most_half_equivalent_v1_pretty_fixture(tmp_path):
+def test_policy_b_v3_serialization_is_at_most_half_equivalent_v1_pretty_fixture(tmp_path):
     examples = [f"Example {number}: " + "incidentalword " * 10 for number in range(20)]
     rows = [_entry("liːd", "metal"), _entry("lɛd", "guide")]
     for row in rows:
@@ -347,3 +370,64 @@ def test_audit_output_requires_phonodist_mode(tmp_path, capsys):
 
     assert status == 2
     assert "requires --pronunciation-equivalence phonodist" in output.err
+
+
+def test_cli_build_loads_reviewed_curated_anchor_overlay(tmp_path, capsys):
+    entries = [
+        {
+            "word": "wug",
+            "pos": "NOUN",
+            "source_id": "fish-row",
+            "pronunciations": [{"ipa": "wʌg"}],
+            "senses": [{"glosses": ["freshwater fish"]}],
+        },
+        {
+            "word": "wug",
+            "pos": "NOUN",
+            "source_id": "music-row",
+            "pronunciations": [{"ipa": "wuːg"}],
+            "senses": [{"glosses": ["musical instrument"]}],
+        },
+    ]
+    overlay = [
+        {
+            "word": "wug",
+            "pos": "NOUN",
+            "source_id": "fish-row",
+            "semantic_anchor": {"namespace": "fixture:en", "keys": ["fish"]},
+        },
+        {
+            "word": "wug",
+            "pos": "NOUN",
+            "source_id": "music-row",
+            "semantic_anchor": {"namespace": "fixture:en", "keys": ["music"]},
+        },
+    ]
+    source = tmp_path / "entries.jsonl"
+    source.write_text("\n".join(json.dumps(row) for row in entries) + "\n", encoding="utf-8")
+    overlay_path = tmp_path / "semantic-anchors.json"
+    overlay_path.write_text(json.dumps(overlay), encoding="utf-8")
+    index_path = tmp_path / "rules.json"
+    identity_audit = tmp_path / "identity-audit.json"
+
+    status, output = _run_cli(
+        capsys,
+        [
+            "build",
+            "--input-jsonl",
+            str(source),
+            "--output",
+            str(index_path),
+            "--language",
+            "en",
+            "--curated-anchors",
+            str(overlay_path),
+            "--identity-audit-output",
+            str(identity_audit),
+        ],
+    )
+
+    assert status == 0
+    assert json.loads(output.out)["resolvable_keys"] == 1
+    records = json.loads(identity_audit.read_text(encoding="utf-8"))
+    assert {record["semantic_anchor"]["keys"][0] for record in records} == {"fish", "music"}

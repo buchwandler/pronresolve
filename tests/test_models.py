@@ -53,7 +53,7 @@ def test_index_rejects_bad_root_and_schema_version():
 def test_runtime_model_rejects_non_scalar_ipa_and_duplicate_cues():
     value = valid_index()
     value["entries"]["read"]["VERB"][0]["ipa"] = ["ɹiːd"]
-    with pytest.raises(ValueError, match="ipa must be a non-empty string"):
+    with pytest.raises(ValueError, match=r"\.ipa must be a non-empty string"):
         AmbiguityIndex.from_dict(value)
 
 

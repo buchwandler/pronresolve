@@ -141,6 +141,7 @@ def test_encoder_rejects_an_emitted_group_with_fewer_than_two_candidates():
     index = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(ReadingProfile("read", "VERB", "r1", "ɹiːd"),),
     )
     with pytest.raises(ValueError, match="at least two candidates"):

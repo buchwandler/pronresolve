@@ -1,6 +1,10 @@
 import pytest
 
-from pronresolve.compile import EVIDENCE_WEIGHTS, compile_cues
+from pronresolve.compile import (
+    EVIDENCE_WEIGHTS,
+    compile_contrastive_cues,
+    compile_cues,
+)
 from pronresolve.models import Cue, ReadingProfile
 
 
@@ -89,9 +93,39 @@ def test_runtime_profile_is_lean_scalar_and_has_unique_ordered_cues():
     assert profile.ipa == "ɹɛd"
     assert profile.sense_ids == ("sense-a", "sense-b")
     assert [cue.token for cue in profile.cues] == ["alpha", "zebra"]
-    assert set(profile.to_dict()) == {"id", "ipa", "sense_ids", "cues"}
+    assert set(profile.to_dict()) == {"id", "anchor_ipa", "cues"}
     with pytest.raises(ValueError, match="duplicate tokens"):
         ReadingProfile("read", "VERB", "r2", "ɹɛd", cues=(Cue("word", 1), Cue("WORD", 3)))
 
     with pytest.raises(ValueError, match="not defined by the Policy B"):
         Cue("unknown", 4.0)
+
+
+def test_contrastive_compiler_removes_cues_shared_by_every_candidate():
+    result = compile_contrastive_cues(
+        [
+            (Cue("common", 3.0), Cue("fish", 3.0)),
+            (Cue("common", 3.0), Cue("music", 3.0)),
+        ]
+    )
+
+    assert result.selectable
+    assert result.reason is None
+    assert result.shared_tokens == ("common",)
+    assert tuple(tuple(cue.token for cue in cues) for cues in result.cue_sets) == (
+        ("fish",),
+        ("music",),
+    )
+
+
+def test_contrastive_compiler_rejects_identical_maps_and_empty_candidate():
+    same_maps = compile_contrastive_cues([(Cue("common", 3.0),), (Cue("common", 3.0),)])
+    assert not same_maps.selectable
+    assert same_maps.reason == "non_discriminative_rules"
+    assert same_maps.cue_sets == ((), ())
+
+    missing_cues = compile_contrastive_cues(
+        [(Cue("common", 3.0), Cue("fish", 3.0)), (Cue("common", 3.0),)]
+    )
+    assert not missing_cues.selectable
+    assert missing_cues.reason == "insufficient_contrastive_evidence"

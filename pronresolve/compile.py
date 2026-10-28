@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 
 from .models import Cue
@@ -39,3 +40,57 @@ def compile_cues(evidence: Mapping[str, Iterable[str]]) -> tuple[Cue, ...]:
                     continue
                 weights[token] = max(weights.get(token, 0.0), weight)
     return tuple(Cue(token=token, weight=weights[token]) for token in sorted(weights))
+
+
+@dataclass(frozen=True, slots=True)
+class ContrastiveCueCompilation:
+    """Cue maps pruned against a complete candidate group."""
+
+    cue_sets: tuple[tuple[Cue, ...], ...]
+    shared_tokens: tuple[str, ...] = ()
+    reason: str | None = None
+
+    @property
+    def selectable(self) -> bool:
+        return self.reason is None
+
+
+def compile_contrastive_cues(
+    candidates: Iterable[Iterable[Cue]],
+) -> ContrastiveCueCompilation:
+    """Drop universally shared cues and fail closed on non-selectable groups."""
+    candidate_cues = tuple(tuple(candidate) for candidate in candidates)
+    if len(candidate_cues) < 2:
+        raise ValueError("contrastive cue compilation requires at least two candidates")
+    if any(any(not isinstance(cue, Cue) for cue in candidate) for candidate in candidate_cues):
+        raise ValueError("contrastive cue candidates must contain Cue values")
+
+    candidate_maps: list[dict[str, float]] = []
+    for candidate in candidate_cues:
+        cue_map: dict[str, float] = {}
+        for cue in candidate:
+            cue_map[cue.token] = max(cue_map.get(cue.token, 0.0), cue.weight)
+        candidate_maps.append(cue_map)
+
+    shared_tokens = tuple(sorted(set.intersection(*(set(cue_map) for cue_map in candidate_maps))))
+    shared = set(shared_tokens)
+    pruned_maps = [
+        {token: weight for token, weight in cue_map.items() if token not in shared}
+        for cue_map in candidate_maps
+    ]
+    cue_sets = tuple(
+        tuple(Cue(token=token, weight=cue_map[token]) for token in sorted(cue_map))
+        for cue_map in pruned_maps
+    )
+    signatures = [tuple((cue.token, cue.weight) for cue in cues) for cues in cue_sets]
+    if len(set(signatures)) != len(signatures):
+        reason = "non_discriminative_rules"
+    elif any(not cues for cues in cue_sets):
+        reason = "insufficient_contrastive_evidence"
+    else:
+        reason = None
+    return ContrastiveCueCompilation(
+        cue_sets=cue_sets,
+        shared_tokens=shared_tokens,
+        reason=reason,
+    )

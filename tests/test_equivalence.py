@@ -7,6 +7,7 @@ from pronresolve.equivalence import (
     EquivalenceConfigurationError,
     ExactEquivalence,
     PhonodistEquivalence,
+    partition_pronunciations,
 )
 
 
@@ -79,3 +80,50 @@ def test_unsupported_profile_is_a_configuration_error():
     pytest.importorskip("phonodist")
     with pytest.raises(EquivalenceConfigurationError, match="no supported language profile"):
         PhonodistEquivalence("xx-XX")
+
+
+def test_partition_merges_only_safe_equivalence_cliques():
+    class PairPolicy:
+        def __init__(self, pairs):
+            self.pairs = {frozenset(pair) for pair in pairs}
+
+        def equivalent(self, left, right):
+            return frozenset((left, right)) in self.pairs
+
+    result = partition_pronunciations(
+        ["c", "b", "a", "a"],
+        policy=PairPolicy({("a", "b")}),
+    )
+
+    assert tuple(item.pronunciations for item in result.classes) == (("a", "b"), ("c",))
+    assert len(result.pairwise_audit) == 3
+    assert not result.unsafe
+
+
+def test_partition_rejects_non_transitive_connected_component():
+    class ChainPolicy:
+        def equivalent(self, left, right):
+            return frozenset((left, right)) in {
+                frozenset(("a", "b")),
+                frozenset(("b", "c")),
+            }
+
+    result = partition_pronunciations(["c", "a", "b"], policy=ChainPolicy())
+
+    assert result.classes == ()
+    assert result.unsafe
+    assert result.reason == "non_transitive_equivalence_component"
+    assert len(result.pairwise_audit) == 3
+
+
+def test_partition_records_comparator_errors_and_fails_closed():
+    class BrokenPolicy:
+        def equivalent(self, left, right):
+            raise RuntimeError("not comparable")
+
+    result = partition_pronunciations(["a", "b", "c"], policy=BrokenPolicy())
+
+    assert result.classes == ()
+    assert result.unsafe
+    assert result.reason == "equivalence_error"
+    assert sum(pair.error is not None for pair in result.pairwise_audit) == 3

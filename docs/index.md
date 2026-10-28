@@ -15,7 +15,7 @@ Install the published package with `python -m pip install pronresolve`. To build
 
 ## Concept
 
-The package separates offline discovery from runtime resolution. Discovery safely links readings to source senses, then compiles useful evidence into normalized weighted cues. Schema-v2 indexes group candidates by normalized word and POS; runtime resolution matches sentence tokens directly against precompiled cues without dictionary-service access or repeated profile tokenization.
+The package separates offline discovery from runtime resolution. Discovery groups by normalized `(word, POS)`, safely links senses, partitions spoken-equivalent pronunciations, constructs semantic resolution classes, and compiles contrastive weighted cues. Schema-v3 `r2` IDs identify those classes independently of IPA; runtime scoring remains deterministic and dependency-light.
 
 ## Discovery pipeline
 
@@ -32,14 +32,14 @@ pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
   --strict-equivalence --audit-output de-equivalence-audit.json
 ```
 
-The `all` stress policy (default) preserves primary and secondary stress. `primary` may ignore secondary stress, but never primary stress. Suppression is all-or-nothing: every pair of exact-IPA candidates must be equivalent or all original candidates and reading IDs remain. Comparisons fail closed when unsupported, and only exact structure or the allowlisted zero-cost German affricate-notation operation can be accepted; a zero feature distance alone is not an equivalence decision.
+The `all` stress policy preserves primary and secondary stress. `primary` may ignore secondary stress, but never primary stress. Discovery merges only safe pairwise-equivalent cliques; comparator errors and non-transitive components are unresolved. IDs are semantic `r2` values, and only explicit structural equivalence rules may merge pronunciations.
 
-The build report adds placeholder and comparison counters (`invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, `equivalence_errors`). `--strict-equivalence` fails the build on comparison errors. `--audit-output` writes separate, sorted structural details for remaining ambiguity pairs; it does not affect candidate selection or runtime JSON. The optional phonodist import is build-time only. Runtime consumers retain the dependency-free schema-v2 contract.
-Call `discover_ambiguities(entries, language="en", locale="en-US")` with a reusable iterable or streaming iterator of mapping- or object-shaped entries. Entries with missing/empty POS are excluded from automatic resolution and reported in `DiscoveryReport.entries_without_pos`. Missing pronunciation is counted separately. If one source entry contains multiple distinct IPA values, its senses cannot safely be linked to an individual IPA, so the key is reported as unlinked rather than guessed.
+The build report records pronunciation, equivalence, semantic-anchor, and contrastive-cue outcomes with structured unresolved reasons. `--strict-equivalence` fails on comparison errors. `--audit-output` writes separate sorted build-only details. Phonodist remains optional; runtime consumers use dependency-free schema v3.
+Call `discover_ambiguities(entries, language="en", locale="en-US")` with mapping- or object-shaped entries. Discovery resolves only same-word/POS ambiguities. Missing POS and pronunciation are reported; multiple pronunciations on one source entry remain unlinked unless explicit safe linkage exists. Every emitted class needs a disjoint stable semantic anchor (source sense IDs or an explicit curated overlay); glosses, cues, and IPA never become identity.
 
 ## Runtime resolution
 
-Use `Resolver.from_path(index_path)` and `resolve(text, start, end, pos=..., lemma=...)`. Offsets refer to original sentence character positions. The resolver scores normalized context tokens against precompiled weighted cues and returns a `Resolution` or `None`. Matched cue tokens and sense IDs provide runtime explanation without retaining dictionary prose. Abstention is intentional when the word is unknown, cues are absent, the best score is too weak, or the top candidates are too close.
+Use `Resolver.from_path(index_path)` and `resolve(text, start, end, pos=..., lemma=...)`. Offsets refer to original sentence character positions. The resolver scores normalized context tokens against precompiled contrastive cues and returns a `Resolution` or `None`. Matched cue tokens, the semantic reading ID, and the anchor IPA provide runtime diagnostics without storing dictionary prose or semantic provenance. Abstention is intentional when the word is unknown, cues are absent, the best score is too weak, or the top candidates are too close.
 
 `resolve_token()` accepts mappings and spaCy-like token objects. POS and lemma are optional; if POS is omitted where the index has multiple POS groups, resolution abstains.
 
@@ -51,7 +51,7 @@ The default score and margin thresholds are heuristic. Context matching ignores 
 
 ## What the runtime stores
 
-The compact v2 runtime index is a decision artifact, not a dictionary-record copy. It groups candidates as `word -> POS -> readings`; each reading stores an ID, scalar IPA, optional sense IDs, and cues grouped by weight. Raw glosses, synonyms, topics, tags, antonyms, examples, and etymology numbers are not retained in runtime profiles.
+The compact schema-v3 artifact groups candidates as `word -> POS -> readings`; each candidate stores a semantic `r2` ID, diagnostic `anchor_ipa`, and cues grouped by weight. It deliberately omits sense IDs, semantic anchors, and raw dictionary prose; provenance belongs in build/audit records.
 
 ## Policy B scoring
 
@@ -67,15 +67,15 @@ Examples are excluded from compiled cues, the runtime index, and scoring. They a
 
 ## Schema compatibility
 
-New indexes are written as compact deterministic schema v2 JSON. The loader accepts both v1 and v2; loading v1 compiles synonyms, glosses, topics, tags, and antonyms into Policy B cues, ignores examples and etymology numbers for runtime, preserves sense IDs, and normalizes a validated one-pronunciation IPA array to scalar IPA. This intentionally does not guarantee legacy v1 score parity when examples affected the old resolver. The runtime `ReadingProfile` and `Resolution.ipa` shapes intentionally use scalar IPA and compiled cues instead of raw evidence prose.
+New builds write schema v3 with `id_version: 2`. The loader accepts v1 and v2 during migration; v1 becomes a schema-v2 runtime model after cue compilation, while v2 load/save stays schema v2 unless explicitly requested. Neither loader reidentifies old IDs; an explicit v3 write requires valid `r2` IDs.
 
 ## CLI
 
-`pronresolve build --input-jsonl entries.jsonl --output index.json --language en` writes a compact v2 index and sibling `.report.json`. `pronresolve inspect index.json` prints summary counts; add `--word WORD` to see readings, scalar IPA, sense IDs, and weighted cues. `pronresolve validate index.json` accepts v1 and v2. Invalid user input returns exit code 2 with a concise stderr error and no traceback.
+`pronresolve build --input-jsonl entries.jsonl --output index.json --language en` writes schema v3 and a sibling `.report.json`; `--rules-id` sets a shared ruleset identifier, `--curated-anchors` loads reviewed anchor data, and `--identity-audit-output` keeps provenance separate. `inspect` shows IDs, diagnostic anchor IPA, and cues. `validate` accepts v1, v2, and v3.
 
 ## Integration boundary
 
-Generate the index beside the matching pronunciation lexicon using correctly filtered source data. The producer owns locale selection and dataset/version metadata. A consuming frontend supplies sentence text, token offsets, and available POS/lemma data, then applies a returned `READING:<reading_id>` selector through its existing lookup path.
+Build rules from correctly filtered locale data. A consuming frontend supplies context and applies the returned `READING:<reading_id>` selector through its existing lookup. Target assets bind `r2` IDs to their native values; `anchor_ipa` is diagnostic and is not a target pronunciation constraint.
 
 ## Limitations
 

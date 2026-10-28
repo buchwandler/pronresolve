@@ -20,6 +20,7 @@ def make_resolver():
         AmbiguityIndex(
             language="en",
             locale="en-US",
+            schema_version=2,
             profiles=(
                 profile("wʌg", {"aviary": 3.0}, "bird"),
                 profile("wuːg", {"road": 3.0}, "bend"),
@@ -66,6 +67,7 @@ def test_missing_pos_with_multiple_pos_groups_returns_none():
     index = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(
             profile("wʌg", {"aviary": 3.0}, "noun-a"),
             profile("wuːg", {"road": 3.0}, "noun-b"),
@@ -99,6 +101,7 @@ def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
     tied = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(
             profile("a", {"shared": 3.0}, "a"),
             profile("b", {"shared": 3.0}, "b"),
@@ -109,6 +112,7 @@ def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
     single = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(profile("a", {"shared": 3.0}, "only"),),
     )
     assert Resolver(single).resolve("wug shared", start=0, end=3, pos="NOUN", lemma="wug") is None
@@ -116,6 +120,7 @@ def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
     three = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(
             profile("a", {"aviary": 3.0}, "a"),
             profile("b", {"road": 3.0}, "b"),
@@ -148,6 +153,7 @@ def test_equal_scores_are_ordered_by_reading_id_and_report_matched_cues():
     tied = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(
             profile("a", {"shared": 3.0}, "z-reading"),
             profile("b", {"shared": 3.0}, "a-reading"),
@@ -166,6 +172,7 @@ def test_example_only_context_has_no_compiled_score():
     index = AmbiguityIndex(
         language="en",
         locale=None,
+        schema_version=2,
         profiles=(
             profile("a", {"aviary": 3.0}, "a"),
             profile("b", {"road": 3.0}, "b"),

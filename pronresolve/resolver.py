@@ -145,7 +145,7 @@ class Resolver:
             word=selected.word,
             pos=selected.pos,
             reading_id=selected.reading_id,
-            ipa=selected.ipa,
+            anchor_ipa=selected.anchor_ipa,
             sense_ids=selected.sense_ids,
             score=best.score,
             margin=margin,

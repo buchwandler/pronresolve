@@ -7,10 +7,10 @@ phonodist policy is constructed.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any, Literal, Protocol
-from collections.abc import Callable
-
 from .normalization import normalize_ipa
 
 StressPolicy = Literal["all", "primary"]
@@ -113,3 +113,115 @@ class PhonodistEquivalence:
                 return False
             approved_operations += 1
         return approved_operations > 0
+
+
+@dataclass(frozen=True, slots=True)
+class PronunciationClass:
+    """A deterministic set of pronunciations proven equivalent pairwise."""
+
+    pronunciations: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        values = tuple(sorted({normalize_ipa(value) for value in self.pronunciations} - {""}))
+        if not values:
+            raise ValueError("pronunciation class requires at least one value")
+        object.__setattr__(self, "pronunciations", values)
+
+
+@dataclass(frozen=True, slots=True)
+class EquivalencePair:
+    left: str
+    right: str
+    equivalent: bool | None
+    comparison: Any = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EquivalencePartition:
+    classes: tuple[PronunciationClass, ...]
+    pairwise_audit: tuple[EquivalencePair, ...] = ()
+    unsafe: bool = False
+    reason: str | None = None
+
+
+def partition_pronunciations(
+    pronunciations: Iterable[str],
+    *,
+    policy: PronunciationEquivalence,
+) -> EquivalencePartition:
+    """Build deterministic complete-linkage classes; reject unsafe components."""
+    items = tuple(sorted({normalize_ipa(value) for value in pronunciations} - {""}))
+    adjacency = {item: {item} for item in items}
+    audit: list[EquivalencePair] = []
+    evaluate = getattr(policy, "evaluate", None)
+
+    for left, right in combinations(items, 2):
+        try:
+            if callable(evaluate):
+                equivalent, comparison = evaluate(left, right)
+                equivalent = bool(equivalent)
+            else:
+                comparison = None
+                equivalent = bool(policy.equivalent(left, right))
+        except Exception as exc:
+            audit.append(
+                EquivalencePair(
+                    left=left,
+                    right=right,
+                    equivalent=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+        audit.append(
+            EquivalencePair(
+                left=left,
+                right=right,
+                equivalent=equivalent,
+                comparison=comparison,
+            )
+        )
+        if equivalent:
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+
+    if any(pair.error is not None for pair in audit):
+        return EquivalencePartition(
+            classes=(),
+            pairwise_audit=tuple(audit),
+            unsafe=True,
+            reason="equivalence_error",
+        )
+
+    components: list[set[str]] = []
+    unvisited = set(items)
+    while unvisited:
+        pending = [min(unvisited)]
+        component: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in component:
+                continue
+            component.add(current)
+            pending.extend(sorted(adjacency[current] - component, reverse=True))
+        unvisited.difference_update(component)
+        components.append(component)
+
+    for component in components:
+        for left, right in combinations(sorted(component), 2):
+            if right not in adjacency[left]:
+                return EquivalencePartition(
+                    classes=(),
+                    pairwise_audit=tuple(audit),
+                    unsafe=True,
+                    reason="non_transitive_equivalence_component",
+                )
+
+    classes = tuple(
+        sorted(
+            (PronunciationClass(tuple(component)) for component in components),
+            key=lambda item: item.pronunciations,
+        )
+    )
+    return EquivalencePartition(classes=classes, pairwise_audit=tuple(audit))

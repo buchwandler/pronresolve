@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -33,17 +34,34 @@ def _string_array(
 
 
 def encode_v2(index: AmbiguityIndex) -> dict[str, Any]:
-    """Encode an internal index using the compact grouped schema-v2 wire format."""
+    """Explicitly encode a grouped schema-v2 compatibility payload."""
     if not isinstance(index, AmbiguityIndex):
         raise TypeError("encode_v2 expects an AmbiguityIndex")
-    payload = index.to_dict()
-    # Reuse the strict decoder to enforce emitted-group and ID/cue invariants.
+    payload = replace(index, schema_version=2, rules_id=None).to_dict()
     decode_v2(payload)
     return payload
 
 
 def decode_v2(value: Mapping[str, Any]) -> AmbiguityIndex:
-    """Validate and decode a schema-v2 payload into canonical runtime models."""
+    """Validate and decode schema v2 without changing reading IDs."""
+    if not isinstance(value, Mapping) or value.get("schema_version") != 2:
+        raise ValueError("decode_v2 expects a schema-v2 object")
+    return AmbiguityIndex.from_dict(value)
+
+
+def encode_v3(index: AmbiguityIndex) -> dict[str, Any]:
+    """Encode the canonical schema-v3 rules format; legacy IDs are never upgraded."""
+    if not isinstance(index, AmbiguityIndex):
+        raise TypeError("encode_v3 expects an AmbiguityIndex")
+    payload = replace(index, schema_version=3).to_dict()
+    decode_v3(payload)
+    return payload
+
+
+def decode_v3(value: Mapping[str, Any]) -> AmbiguityIndex:
+    """Validate and decode schema v3 with mandatory r2 identity metadata."""
+    if not isinstance(value, Mapping) or value.get("schema_version") != 3:
+        raise ValueError("decode_v3 expects a schema-v3 object")
     return AmbiguityIndex.from_dict(value)
 
 
@@ -113,14 +131,30 @@ def decode_v1(value: Mapping[str, Any]) -> AmbiguityIndex:
             )
         )
 
-    return AmbiguityIndex(language=language, locale=locale, profiles=tuple(profiles))
+    return AmbiguityIndex(
+        language=language,
+        locale=locale,
+        profiles=tuple(profiles),
+        schema_version=2,
+    )
 
 
-def save_index(index: AmbiguityIndex, path: str | Path) -> Path:
+def save_index(
+    index: AmbiguityIndex,
+    path: str | Path,
+    *,
+    schema_version: int | None = None,
+) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".tmp")
-    payload = encode_v2(index)
+    output_version = index.schema_version if schema_version is None else schema_version
+    if output_version == 2:
+        payload = encode_v2(index)
+    elif output_version == INDEX_SCHEMA_VERSION:
+        payload = encode_v3(index)
+    else:
+        raise ValueError(f"unsupported output schema version {output_version}")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -139,6 +173,8 @@ def load_index(path: str | Path) -> AmbiguityIndex:
         raise ValueError("schema_version must be an integer")
     if version == 1:
         return decode_v1(value)
-    if version == INDEX_SCHEMA_VERSION:
+    if version == 2:
         return decode_v2(value)
+    if version == INDEX_SCHEMA_VERSION:
+        return decode_v3(value)
     raise ValueError(f"unsupported ambiguity index schema {version}")

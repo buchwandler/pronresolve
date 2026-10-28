@@ -34,10 +34,10 @@ pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
   --strict-equivalence --audit-output de-equivalence-audit.json
 ```
 
-Phonodist mode compares structure rather than treating a zero feature distance as identity. `all` preserves primary and secondary stress (the default); `primary` still preserves primary stress but may ignore secondary-stress differences. Discovery suppresses a candidate group only when every exact-IPA pair is equivalent. Otherwise it keeps the original IPA candidates and reading IDs; unsupported comparisons fail closed and are counted. Only exact structure and the explicitly allowlisted zero-cost German affricate-notation rule can be equivalent.
+Phonodist mode compares structure rather than treating a zero feature distance as identity. `all` preserves primary and secondary stress (the default); `primary` may ignore secondary stress. Discovery merges only safe pairwise-equivalent cliques; comparator errors and non-transitive components remain unresolved. Resolution IDs are semantic `r2` IDs and do not depend on IPA.
 
-The sibling `.report.json` records `invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, and `equivalence_errors`. `--strict-equivalence` aborts if any comparison errors occur. The optional audit is a separate, sorted JSON file containing structural details for remaining ambiguity pairs; it does not change the runtime index or make distance-based decisions. Phonodist is loaded only for this explicit build-time mode: runtime consumers remain dependency-free and the runtime schema stays v2.
-The build pipeline streams dictionary-entry mappings or objects into `discover_ambiguities()`. The package groups by normalized spelling and POS, normalizes pronunciations, and generates stable reading IDs.
+The sibling `.report.json` records pronunciation, equivalence, semantic-anchor, and contrastive-cue outcomes, including structured unresolved reasons. `--strict-equivalence` aborts if comparisons fail. The optional audit is a separate, sorted build-only file. Phonodist remains optional; runtime consumers use deterministic schema v3 without it.
+Discovery groups by normalized `(word, POS)`, safely partitions pronunciation equivalence classes, merges evidence within each class, and creates `r2` IDs from explicit semantic anchors rather than IPA or cues. Missing or overlapping anchors are unresolved. A curated anchor overlay may supply reviewed semantic keys when stable source sense IDs are absent.
 
 ```python
 from pronresolve import discover_ambiguities, save_index
@@ -47,7 +47,7 @@ save_index(result.index, "en-us.pronresolve.json")
 print(result.report.as_dict())
 ```
 
-A key with only one IPA is not ambiguous. Multiple IPA values on one source entry are treated as unlinked ambiguity and omitted rather than guessed. Entries with missing or empty POS are excluded from automatic resolution and counted in `entries_without_pos` in the discovery report. Missing pronunciation is also counted separately.
+A same-word/POS group with one final pronunciation-equivalence class is not a runtime ambiguity. Groups with multiple classes are emitted only when they have safe semantic anchors and contrastive cues; entries with missing POS are excluded and counted. Multiple IPA values on a source entry without safe sense linkage are unresolved rather than guessed.
 
 ## Runtime resolution
 
@@ -66,7 +66,7 @@ decision = resolver.resolve(
 )
 if decision is not None:
     selector = decision.selector
-    ipa = decision.ipa
+    anchor_ipa = decision.anchor_ipa
 ```
 
 A `None` result means the existing default pronunciation path should remain in use. The resolver is deterministic and explainable, not a claim of linguistic certainty.
@@ -80,11 +80,11 @@ pronresolve inspect index.json [--word WORD]
 pronresolve validate index.json
 ```
 
-`build` reads one JSON object per non-empty JSONL line and writes a compact v2 index plus `<output>.report.json`. `inspect` prints summary counts; add `--word WORD` to view each reading's IPA, sense IDs, and weighted cues. `validate` accepts v1 and v2. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
+`build` reads JSONL and writes schema v3 plus `<output>.report.json`. `--rules-id` sets the shared ruleset identifier; `--curated-anchors` loads a reviewed JSON overlay, and `--identity-audit-output` writes semantic provenance separately. `inspect` shows IDs, diagnostic anchor IPA, and cues. `validate` accepts v1, v2, and v3; legacy IDs are never reidentified on load.
 
 ## What pronresolve stores
 
-The resolver index is a compact decision artifact, not a copy of dictionary records. Schema v2 groups candidates by normalized word and POS. Each runtime reading profile contains a reading ID, scalar IPA, sense IDs, and normalized cue tokens grouped by weight. Raw gloss, synonym, topic, tag, antonym, example, and etymology prose is not stored in runtime profiles.
+The runtime index is compact and contains resolution-class IDs, deterministic `anchor_ipa` representatives, and normalized cue tokens grouped by weight. It does not contain semantic anchors, sense IDs, or raw dictionary prose; discovery identity provenance belongs in build/audit records.
 
 ### Policy B runtime scoring
 
@@ -100,15 +100,15 @@ Examples are excluded from runtime scoring and serialized cues. They are disprop
 
 ### Schema compatibility
 
-New indexes are written as compact, deterministic schema v2 JSON. The loader also accepts schema v1, compiles its synonyms, glosses, topics, tags, and antonyms into Policy B cues, and deliberately ignores examples and etymology numbers for runtime resolution. Therefore v1 scores are not guaranteed to match the previous resolver when examples contributed evidence.
+New builds write schema v3 with `id_version: 2`. The loader accepts schema v1 and v2 during migration; v1 is compiled to the legacy schema-v2 runtime model, and v2 load/save remains schema v2 unless explicitly requested. Neither path changes old IDs. An explicit v3 write requires valid `r2` IDs.
 
-The runtime `ReadingProfile` API intentionally changed: IPA is scalar and lexical evidence is exposed as compiled `Cue` values instead of raw prose fields. `Resolution.ipa` is also scalar. Callers should use the returned `sense_ids`, `evidence_terms`, and reading ID for runtime explanation and selection.
+`ReadingProfile.anchor_ipa` is the deterministic diagnostic representative, not the target lexicon pronunciation. `ReadingProfile.ipa` and `Resolution.ipa` remain compatibility aliases; use `anchor_ipa` in new integrations. Schema v3 does not store source sense IDs or semantic anchors in the runtime artifact.
 
-Schema-v2 JSON uses `schema_version`, `language`, `locale`, and an `entries` object grouped as `word -> POS -> candidates`; each candidate stores `id`, scalar `ipa`, optional `sense_ids`, and `cues` grouped by weight. Unsupported versions and malformed structures are rejected. Dataset/version identity belongs to the containing lexicon package or artifact metadata, not the index JSON; publish the index beside its matching pronunciation lexicon.
+Schema-v3 JSON includes `schema_version`, `id_version`, `rules_id`, `language`, `locale`, and `entries` grouped as `word -> POS -> candidates`. Each candidate stores `id`, diagnostic `anchor_ipa`, and `cues`. The ID represents a semantic pronunciation-resolution class; target assets must bind it to their own native pronunciation values and must not compare them with `anchor_ipa`.
 
 ## Integration boundary
 
-The producer supplies dictionary entries and locale-filtered source data. Consumers load the generated index, pass token spans/context to the resolver, and apply the returned `READING:<reading_id>` selector through their existing selector-aware lookup. Locale is stored as metadata only; runtime locale filtering is not performed here.
+The producer supplies source data and locale-specific shared rules. Consumers pass token offsets/context to the resolver, then bind `READING:<r2-id>` to target-native pronunciation values. Never compare target values with `anchor_ipa` or regenerate IDs from target encodings.
 
 ## Limitations
 

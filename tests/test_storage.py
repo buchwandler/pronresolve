@@ -27,6 +27,7 @@ def test_index_round_trip_saves_compact_v2_and_resolver_path_loads_it(tmp_path):
     index = AmbiguityIndex(
         language="en",
         locale="en-US",
+        schema_version=2,
         profiles=(
             ReadingProfile(
                 word="wug",

@@ -29,6 +29,13 @@ def _jsonl_entries(path: Path) -> Iterable[dict[str, Any]]:
             yield value
 
 
+def _json_object_array(path: Path) -> list[dict[str, Any]]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError(f"{path}: expected a JSON array of objects")
+    return value
+
+
 def _source_schema_version(path: Path) -> Any:
     value = json.loads(path.read_text(encoding="utf-8"))
     return value.get("schema_version") if isinstance(value, dict) else None
@@ -45,6 +52,9 @@ def _index_summary(index, source_schema_version: Any) -> dict[str, Any]:
         "runtime_schema_version": index.schema_version,
         "language": index.language,
         "locale": index.locale,
+        "id_version": 2 if index.schema_version == 3 else None,
+        "rules_id": index.rules_id,
+        "resolution_class_count": len(profiles),
         "ambiguous_word_count": word_count,
         "ambiguous_words": word_count,
         "word_pos_group_count": len(groups),
@@ -67,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--output", required=True, type=Path)
     build.add_argument("--language", required=True)
     build.add_argument("--locale")
+    build.add_argument("--rules-id", help="shared ruleset identifier (defaults to locale/language)")
+    build.add_argument(
+        "--curated-anchors",
+        type=Path,
+        help="JSON array of reviewed semantic-anchor overrides",
+    )
     build.add_argument(
         "--pronunciation-equivalence",
         choices=("exact", "phonodist"),
@@ -89,12 +105,17 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="write sorted structural comparisons for remaining ambiguity pairs",
     )
+    build.add_argument(
+        "--identity-audit-output",
+        type=Path,
+        help="write semantic identity provenance separately from the runtime index",
+    )
 
     inspect = subparsers.add_parser("inspect", help="print index summary and optional word details")
     inspect.add_argument("index", type=Path)
     inspect.add_argument("--word", help="show readings and weighted cues for one word")
 
-    validate = subparsers.add_parser("validate", help="validate a v1 or v2 index schema")
+    validate = subparsers.add_parser("validate", help="validate a v1, v2, or v3 index schema")
     validate.add_argument("index", type=Path)
 
     args = parser.parse_args(argv)
@@ -111,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
             result = discover_ambiguities(
                 _jsonl_entries(args.input_jsonl),
                 language=args.language,
+                rules_id=args.rules_id,
+                curated_anchors=(
+                    _json_object_array(args.curated_anchors)
+                    if args.curated_anchors is not None
+                    else None
+                ),
                 locale=args.locale,
                 pronunciation_equivalence=equivalence,
                 include_equivalence_audit=args.audit_output is not None,
@@ -134,6 +161,19 @@ def main(argv: list[str] | None = None) -> int:
                     + "\n",
                     encoding="utf-8",
                 )
+            if args.identity_audit_output is not None:
+                args.identity_audit_output.parent.mkdir(parents=True, exist_ok=True)
+                identity_records = [identity.to_dict() for identity in result.identity_audit]
+                args.identity_audit_output.write_text(
+                    json.dumps(
+                        identity_records,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
             if args.strict_equivalence and result.report.equivalence_errors:
                 raise ValueError(
                     f"phonodist comparison errors occurred: {result.report.equivalence_errors}"
@@ -147,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             if args.audit_output is not None:
                 output["equivalence_audit"] = str(args.audit_output)
+            if args.identity_audit_output is not None:
+                output["identity_audit"] = str(args.identity_audit_output)
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 0
 
@@ -161,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
                     "word": profile.word,
                     "pos": profile.pos,
                     "reading_id": profile.reading_id,
+                    "anchor_ipa": profile.anchor_ipa,
                     "ipa": profile.ipa,
                     "sense_ids": list(profile.sense_ids),
                     "weighted_cues": _weighted_cues(profile),
