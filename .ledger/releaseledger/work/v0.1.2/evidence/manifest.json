@@ -1,0 +1,70 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 723,
+      "deletions": 19,
+      "patch_file": "a4b795e.patch",
+      "patch_sha256": "a1bf96163b4e4aaccd3e75792d60b19b8fca17fb38b3b11d14be20675a1eb41b",
+      "paths": [
+        "README.md",
+        "docs/api.md",
+        "docs/index.md",
+        "pronresolve/__init__.py",
+        "pronresolve/cli.py",
+        "pronresolve/discovery.py",
+        "pronresolve/equivalence.py",
+        "pronresolve/models.py",
+        "pronresolve/normalization.py",
+        "pyproject.toml",
+        "tests/test_cli.py",
+        "tests/test_discovery.py",
+        "tests/test_equivalence.py",
+        "tests/test_models.py"
+      ],
+      "sha": "a4b795e782649a2820baaaa7f811ff8b6825a35e",
+      "short_sha": "a4b795e",
+      "source_ref": "git:a4b795e782649a2820baaaa7f811ff8b6825a35e"
+    },
+    {
+      "additions": 1576,
+      "deletions": 163,
+      "patch_file": "b1f9cd3.patch",
+      "patch_sha256": "745a4c637ea1cffc13524e93e8d310025abddbcf3ea9976d1f2825b91ac7d224",
+      "paths": [
+        "README.md",
+        "docs/api.md",
+        "docs/index.md",
+        "pronresolve/__init__.py",
+        "pronresolve/cli.py",
+        "pronresolve/compile.py",
+        "pronresolve/discovery.py",
+        "pronresolve/equivalence.py",
+        "pronresolve/models.py",
+        "pronresolve/resolver.py",
+        "pronresolve/storage.py",
+        "tests/test_cli.py",
+        "tests/test_compilation.py",
+        "tests/test_discovery.py",
+        "tests/test_equivalence.py",
+        "tests/test_identity.py",
+        "tests/test_models.py",
+        "tests/test_resolver.py",
+        "tests/test_schema_v2.py",
+        "tests/test_schema_v3.py",
+        "tests/test_storage.py"
+      ],
+      "sha": "b1f9cd347057c2f3fdabea3690687e4124c978ee",
+      "short_sha": "b1f9cd3",
+      "source_ref": "git:b1f9cd347057c2f3fdabea3690687e4124c978ee"
+    }
+  ],
+  "git_base_ref": "836137cba225414f0937e708dc516afe013308cb",
+  "git_base_sha": "836137cba225414f0937e708dc516afe013308cb",
+  "git_head_ref": "b1f9cd347057c2f3fdabea3690687e4124c978ee",
+  "git_head_sha": "b1f9cd347057c2f3fdabea3690687e4124c978ee",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.2",
+  "schema_version": 1
+}

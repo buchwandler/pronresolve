@@ -1,0 +1,1016 @@
+ README.md                    |  16 ++++++
+ docs/api.md                  |   6 ++
+ docs/index.md                |  16 ++++++
+ pronresolve/__init__.py      |  10 ++++
+ pronresolve/cli.py           |  71 +++++++++++++++++++----
+ pronresolve/discovery.py     | 134 +++++++++++++++++++++++++++++++++++++++++--
+ pronresolve/equivalence.py   | 115 +++++++++++++++++++++++++++++++++++++
+ pronresolve/models.py        |  20 ++++++-
+ pronresolve/normalization.py |   8 +++
+ pyproject.toml               |   1 +
+ tests/test_cli.py            | 123 +++++++++++++++++++++++++++++++++++++++
+ tests/test_discovery.py      | 134 +++++++++++++++++++++++++++++++++++++++++++
+ tests/test_equivalence.py    |  81 ++++++++++++++++++++++++++
+ tests/test_models.py         |   7 +++
+ 14 files changed, 723 insertions(+), 19 deletions(-)
+
+diff --git a/README.md b/README.md
+index 655cd71..5e089bd 100644
+--- a/README.md
++++ b/README.md
+@@ -21,6 +21,22 @@ The current CI matrix verifies Python 3.10–3.13; Python 3.14 has not yet been
+
+ ## Concept and discovery
+
++### Optional build-time pronunciation equivalence
++
++Exact normalized IPA comparison remains the default. Pronunciation values with no segment-like Unicode letter (including punctuation-only placeholders such as `…`) are rejected unconditionally; this screening is not a full IPA validator.
++
++Install the optional structural comparator only when building with phonodist equivalence:
++
++```bash
++python -m pip install "pronresolve[phonetic]"
++pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
++  --pronunciation-equivalence phonodist --stress-policy all \\
++  --strict-equivalence --audit-output de-equivalence-audit.json
++```
++
++Phonodist mode compares structure rather than treating a zero feature distance as identity. `all` preserves primary and secondary stress (the default); `primary` still preserves primary stress but may ignore secondary-stress differences. Discovery suppresses a candidate group only when every exact-IPA pair is equivalent. Otherwise it keeps the original IPA candidates and reading IDs; unsupported comparisons fail closed and are counted. Only exact structure and the explicitly allowlisted zero-cost German affricate-notation rule can be equivalent.
++
++The sibling `.report.json` records `invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, and `equivalence_errors`. `--strict-equivalence` aborts if any comparison errors occur. The optional audit is a separate, sorted JSON file containing structural details for remaining ambiguity pairs; it does not change the runtime index or make distance-based decisions. Phonodist is loaded only for this explicit build-time mode: runtime consumers remain dependency-free and the runtime schema stays v2.
+ The build pipeline streams dictionary-entry mappings or objects into `discover_ambiguities()`. The package groups by normalized spelling and POS, normalizes pronunciations, and generates stable reading IDs.
+
+ ```python
+diff --git a/docs/api.md b/docs/api.md
+index 5e68540..c759bb4 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -7,3 +7,9 @@ The following objects are exported from the top-level `pronresolve` package.
+    :members:
+    :undoc-members:
+ ```
++
++## Build-time equivalence policies
++
++The top-level package exports `PronunciationEquivalence`, `ExactEquivalence`, `PhonodistEquivalence`, and `EquivalenceConfigurationError`. Exact comparison is the default discovery behavior; pass an explicit `PhonodistEquivalence(language=..., stress_policy="all"|"primary")` to enable structural filtering. Constructing that optional policy loads phonodist and requires the `phonetic` extra. It is not needed by index loaders or runtime resolution.
++
++`DiscoveryReport.as_dict()` includes invalid-pronunciation, equivalence-comparison, comparison-error, and suppressed-equivalent-key counters. `DiscoveryResult.equivalence_audit` contains the optional build-only audit records. These additions do not alter schema-v2 index serialization or runtime dependencies.
+diff --git a/docs/index.md b/docs/index.md
+index 6d2fbc4..ae89c64 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -19,6 +19,22 @@ The package separates offline discovery from runtime resolution. Discovery safel
+
+ ## Discovery pipeline
+
++## Optional build-time pronunciation equivalence
++
++`discover_ambiguities()` and `pronresolve build` use exact normalized IPA identity by default. Invalid pronunciation values with no segment-like Unicode letter are rejected independently of this option; this is a minimal placeholder screen, not full IPA validation.
++
++For conservative structural comparison, install the optional dependency and select phonodist explicitly:
++
++```bash
++python -m pip install "pronresolve[phonetic]"
++pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
++  --pronunciation-equivalence phonodist --stress-policy all \\
++  --strict-equivalence --audit-output de-equivalence-audit.json
++```
++
++The `all` stress policy (default) preserves primary and secondary stress. `primary` may ignore secondary stress, but never primary stress. Suppression is all-or-nothing: every pair of exact-IPA candidates must be equivalent or all original candidates and reading IDs remain. Comparisons fail closed when unsupported, and only exact structure or the allowlisted zero-cost German affricate-notation operation can be accepted; a zero feature distance alone is not an equivalence decision.
++
++The build report adds placeholder and comparison counters (`invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, `equivalence_errors`). `--strict-equivalence` fails the build on comparison errors. `--audit-output` writes separate, sorted structural details for remaining ambiguity pairs; it does not affect candidate selection or runtime JSON. The optional phonodist import is build-time only. Runtime consumers retain the dependency-free schema-v2 contract.
+ Call `discover_ambiguities(entries, language="en", locale="en-US")` with a reusable iterable or streaming iterator of mapping- or object-shaped entries. Entries with missing/empty POS are excluded from automatic resolution and reported in `DiscoveryReport.entries_without_pos`. Missing pronunciation is counted separately. If one source entry contains multiple distinct IPA values, its senses cannot safely be linked to an individual IPA, so the key is reported as unlinked rather than guessed.
+
+ ## Runtime resolution
+diff --git a/pronresolve/__init__.py b/pronresolve/__init__.py
+index 15e85b0..16e6c3c 100644
+--- a/pronresolve/__init__.py
++++ b/pronresolve/__init__.py
+@@ -6,6 +6,12 @@ except ImportError:  # Source checkout before setuptools-scm has generated _vers
+     __version__ = "0+unknown"
+
+ from .discovery import discover_ambiguities, reading_id_for
++from .equivalence import (
++    EquivalenceConfigurationError,
++    ExactEquivalence,
++    PhonodistEquivalence,
++    PronunciationEquivalence,
++)
+ from .models import (
+     AmbiguityIndex,
+     Cue,
+@@ -23,6 +29,10 @@ __all__ = [
+     "AmbiguityIndex",
+     "CandidateScore",
+     "Cue",
++    "EquivalenceConfigurationError",
++    "ExactEquivalence",
++    "PhonodistEquivalence",
++    "PronunciationEquivalence",
+     "DiscoveryReport",
+     "DiscoveryResult",
+     "ReadingProfile",
+diff --git a/pronresolve/cli.py b/pronresolve/cli.py
+index 5a183f4..27e530f 100644
+--- a/pronresolve/cli.py
++++ b/pronresolve/cli.py
+@@ -10,6 +10,7 @@ from pathlib import Path
+ from typing import Any
+
+ from .discovery import discover_ambiguities
++from .equivalence import PhonodistEquivalence
+ from .normalization import normalize_word
+ from .storage import load_index, save_index
+
+@@ -66,6 +67,28 @@ def main(argv: list[str] | None = None) -> int:
+     build.add_argument("--output", required=True, type=Path)
+     build.add_argument("--language", required=True)
+     build.add_argument("--locale")
++    build.add_argument(
++        "--pronunciation-equivalence",
++        choices=("exact", "phonodist"),
++        default="exact",
++        help="build-time IPA equivalence policy (default: exact)",
++    )
++    build.add_argument(
++        "--stress-policy",
++        choices=("all", "primary"),
++        default="all",
++        help="stress required by phonodist equivalence (default: all)",
++    )
++    build.add_argument(
++        "--strict-equivalence",
++        action="store_true",
++        help="fail the build if any phonodist comparisons cannot be evaluated",
++    )
++    build.add_argument(
++        "--audit-output",
++        type=Path,
++        help="write sorted structural comparisons for remaining ambiguity pairs",
++    )
+
+     inspect = subparsers.add_parser("inspect", help="print index summary and optional word details")
+     inspect.add_argument("index", type=Path)
+@@ -77,30 +100,54 @@ def main(argv: list[str] | None = None) -> int:
+     args = parser.parse_args(argv)
+     try:
+         if args.command == "build":
++            equivalence = None
++            if args.pronunciation_equivalence == "phonodist":
++                equivalence = PhonodistEquivalence(
++                    language=args.language,
++                    stress_policy=args.stress_policy,
++                )
++            if args.audit_output is not None and equivalence is None:
++                raise ValueError("--audit-output requires --pronunciation-equivalence phonodist")
+             result = discover_ambiguities(
+                 _jsonl_entries(args.input_jsonl),
+                 language=args.language,
+                 locale=args.locale,
++                pronunciation_equivalence=equivalence,
++                include_equivalence_audit=args.audit_output is not None,
+             )
+-            save_index(result.index, args.output)
+             report_path = args.output.with_name(args.output.name + ".report.json")
++            report_path.parent.mkdir(parents=True, exist_ok=True)
+             report_path.write_text(
+                 json.dumps(result.report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True)
+                 + "\n",
+                 encoding="utf-8",
+             )
+-            print(
+-                json.dumps(
+-                    {
+-                        "index": str(args.output),
+-                        "schema_version": result.index.schema_version,
+-                        "report": str(report_path),
+-                        **result.report.as_dict(),
+-                    },
+-                    ensure_ascii=False,
+-                    indent=2,
++            if args.audit_output is not None:
++                args.audit_output.parent.mkdir(parents=True, exist_ok=True)
++                args.audit_output.write_text(
++                    json.dumps(
++                        list(result.equivalence_audit),
++                        ensure_ascii=False,
++                        indent=2,
++                        sort_keys=True,
++                    )
++                    + "\n",
++                    encoding="utf-8",
+                 )
+-            )
++            if args.strict_equivalence and result.report.equivalence_errors:
++                raise ValueError(
++                    f"phonodist comparison errors occurred: {result.report.equivalence_errors}"
++                )
++            save_index(result.index, args.output)
++            output = {
++                "index": str(args.output),
++                "schema_version": result.index.schema_version,
++                "report": str(report_path),
++                **result.report.as_dict(),
++            }
++            if args.audit_output is not None:
++                output["equivalence_audit"] = str(args.audit_output)
++            print(json.dumps(output, ensure_ascii=False, indent=2))
+             return 0
+
+         source_schema_version = _source_schema_version(args.index)
+diff --git a/pronresolve/discovery.py b/pronresolve/discovery.py
+index c43bbe4..b2b1ab6 100644
+--- a/pronresolve/discovery.py
++++ b/pronresolve/discovery.py
+@@ -7,12 +7,19 @@ import json
+ import re
+ import unicodedata
+ from collections import defaultdict
++from itertools import combinations
+ from collections.abc import Iterable, Mapping
+ from typing import Any
+
+ from .compile import compile_cues
++from .equivalence import PronunciationEquivalence
+ from .models import AmbiguityIndex, DiscoveryReport, DiscoveryResult, ReadingProfile
+-from .normalization import normalize_ipa, normalize_pos, normalize_word
++from .normalization import (
++    _is_pronunciation_candidate,
++    normalize_ipa,
++    normalize_pos,
++    normalize_word,
++)
+
+ _LANG_RE = re.compile(r"[^a-z0-9]+")
+
+@@ -57,20 +64,71 @@ def _example_text(value: Any) -> str:
+     return str(_field(value, "text", "") or "")
+
+
+-def _pronunciations(entry: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
++def _pronunciations(entry: Any) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], int]:
+     raw = _field(entry, "pronunciations")
+     if raw is None:
+         raw = _field(entry, "sounds", ())
+     result: list[tuple[str, tuple[str, ...]]] = []
+     seen: set[str] = set()
++    invalid_values = 0
+     for item in _as_sequence(raw):
+         ipa = normalize_ipa(str(_field(item, "ipa", "") or ""))
+-        if not ipa or ipa in seen:
++        if not _is_pronunciation_candidate(ipa):
++            invalid_values += 1
++            continue
++        if ipa in seen:
+             continue
+         seen.add(ipa)
+         tags = _unique_text(_as_sequence(_field(item, "tags", ())))
+         result.append((ipa, tags))
+-    return tuple(result)
++    return tuple(result), invalid_values
++
++
++def _comparison_audit_record(
++    word: str,
++    pos: str,
++    left: str,
++    right: str,
++    comparison: Any = None,
++    error: Exception | None = None,
++) -> dict[str, Any]:
++    record: dict[str, Any] = {
++        "word": word,
++        "pos": pos,
++        "ipa_left": left,
++        "ipa_right": right,
++    }
++    if comparison is None:
++        if error is not None:
++            record["error"] = f"{type(error).__name__}: {error}"
++        return record
++
++    def event_dict(event: Any) -> dict[str, Any] | None:
++        if event is None:
++            return None
++        return {"kind": event.kind, "anchor": event.anchor}
++
++    record["distance"] = comparison.segmental.distance
++    record["classification"] = comparison.classification
++    record["stress_operations"] = [
++        {
++            "kind": operation.kind,
++            "source": event_dict(operation.source),
++            "target": event_dict(operation.target),
++        }
++        for operation in comparison.stress_operations
++    ]
++    record["alignment_operations"] = [
++        {
++            "kind": operation.kind,
++            "source": list(operation.source),
++            "target": list(operation.target),
++            "cost": operation.cost,
++            "reason": operation.reason,
++        }
++        for operation in comparison.segmental.operations
++    ]
++    return record
+
+
+ def _entry_evidence(entry: Any) -> dict[str, tuple[str, ...]]:
+@@ -127,15 +185,24 @@ def discover_ambiguities(
+     *,
+     language: str,
+     locale: str | None = None,
++    pronunciation_equivalence: PronunciationEquivalence | None = None,
++    include_equivalence_audit: bool = False,
+ ) -> DiscoveryResult:
+     """Scan dictionary-entry objects and create profiles only when sense linkage is safe.
+
+     Entries can be Lexhint ``DictionaryEntry`` instances or mappings with the same
+     fields. Entries are consumed once, so generators and streaming iterators work.
+     """
++    if include_equivalence_audit and pronunciation_equivalence is None:
++        raise ValueError("equivalence audit requires a pronunciation equivalence policy")
++    if include_equivalence_audit and not callable(
++        getattr(pronunciation_equivalence, "evaluate", None)
++    ):
++        raise ValueError("equivalence audit requires a policy that exposes comparison details")
+     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+     entries_scanned = 0
+     entries_without_pronunciation = 0
++    invalid_pronunciation_values = 0
+     entries_without_pos = 0
+
+     for entry in entries:
+@@ -149,7 +216,8 @@ def discover_ambiguities(
+             entries_without_pos += 1
+             continue
+         pos = normalize_pos(raw_pos)
+-        pronunciations = _pronunciations(entry)
++        pronunciations, invalid_values = _pronunciations(entry)
++        invalid_pronunciation_values += invalid_values
+         if not pronunciations:
+             entries_without_pronunciation += 1
+             continue
+@@ -167,6 +235,10 @@ def discover_ambiguities(
+     unlinked_ambiguity_keys = 0
+     non_ambiguous_keys = 0
+     unlinked_keys: list[str] = []
++    equivalence_comparisons = 0
++    equivalence_errors = 0
++    equivalent_pronunciation_keys = 0
++    audit_rows: list[dict[str, Any]] = []
+
+     for (normalized_word, pos), entry_rows in sorted(grouped.items()):
+         all_ipa = {ipa for row in entry_rows for ipa, _tags in row["pronunciations"]}
+@@ -192,6 +264,39 @@ def discover_ambiguities(
+             non_ambiguous_keys += 1
+             continue
+
++        group_audit: list[dict[str, Any]] = []
++        if pronunciation_equivalence is not None:
++            pair_results: list[bool] = []
++            evaluate = getattr(pronunciation_equivalence, "evaluate", None)
++            for left, right in combinations(sorted(by_ipa), 2):
++                equivalence_comparisons += 1
++                comparison = None
++                try:
++                    if callable(evaluate):
++                        pair_equivalent, comparison = evaluate(left, right)
++                    else:
++                        pair_equivalent = pronunciation_equivalence.equivalent(left, right)
++                except Exception as exc:
++                    equivalence_errors += 1
++                    pair_equivalent = False
++                    if include_equivalence_audit:
++                        group_audit.append(
++                            _comparison_audit_record(normalized_word, pos, left, right, error=exc)
++                        )
++                else:
++                    pair_equivalent = bool(pair_equivalent)
++                    if include_equivalence_audit:
++                        group_audit.append(
++                            _comparison_audit_record(
++                                normalized_word, pos, left, right, comparison=comparison
++                            )
++                        )
++                pair_results.append(pair_equivalent)
++            if pair_results and all(pair_results):
++                equivalent_pronunciation_keys += 1
++                non_ambiguous_keys += 1
++                continue
++            audit_rows.extend(group_audit)
+         resolvable_keys += 1
+         # The index key is normalized; using it as the profile word keeps output
+         # deterministic even when the source contains case variants in different orders.
+@@ -246,5 +351,22 @@ def discover_ambiguities(
+         entries_without_pronunciation=entries_without_pronunciation,
+         entries_without_pos=entries_without_pos,
+         unlinked_keys=tuple(unlinked_keys),
++        invalid_pronunciation_values=invalid_pronunciation_values,
++        equivalent_pronunciation_keys=equivalent_pronunciation_keys,
++        equivalence_comparisons=equivalence_comparisons,
++        equivalence_errors=equivalence_errors,
++    )
++    audit_rows.sort(
++        key=lambda item: (
++            item.get("distance", float("inf")),
++            item["word"],
++            item["pos"],
++            item["ipa_left"],
++            item["ipa_right"],
++        )
++    )
++    return DiscoveryResult(
++        index=index,
++        report=report,
++        equivalence_audit=tuple(audit_rows),
+     )
+-    return DiscoveryResult(index=index, report=report)
+diff --git a/pronresolve/equivalence.py b/pronresolve/equivalence.py
+new file mode 100644
+index 0000000..ff90759
+--- /dev/null
++++ b/pronresolve/equivalence.py
+@@ -0,0 +1,115 @@
++"""Build-time pronunciation equivalence policies.
++
++The module itself has no phonodist import so ordinary pronresolve consumers remain
++runtime-dependency-free. The optional comparator is imported only when the explicit
++phonodist policy is constructed.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from typing import Any, Literal, Protocol
++from collections.abc import Callable
++
++from .normalization import normalize_ipa
++
++StressPolicy = Literal["all", "primary"]
++
++APPROVED_ZERO_COST_NOTATION_RULES = frozenset({"de-DE:affricate-notation"})
++
++
++class PronunciationEquivalence(Protocol):
++    """Policy boundary for build-time decisions about two IPA strings."""
++
++    def equivalent(self, left: str, right: str) -> bool:
++        """Return whether the two normalized pronunciations can be collapsed."""
++        ...
++
++
++@dataclass(frozen=True, slots=True)
++class ExactEquivalence:
++    """Treat only pronresolve-normalized, exactly equal IPA strings as equivalent."""
++
++    def equivalent(self, left: str, right: str) -> bool:
++        return normalize_ipa(left) == normalize_ipa(right)
++
++
++class EquivalenceConfigurationError(ValueError):
++    """Raised when an explicitly requested optional equivalence policy is unavailable."""
++
++
++@dataclass(frozen=True, slots=True)
++class PhonodistEquivalence:
++    """Conservative structural comparison using phonodist's ``ipa-compare/1`` API."""
++
++    language: str
++    stress_policy: StressPolicy = "all"
++    _compare_pronunciations: Callable[..., Any] = field(init=False, repr=False, compare=False)
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.language, str) or not self.language.strip():
++            raise EquivalenceConfigurationError("phonodist equivalence requires a language profile")
++        if self.stress_policy not in ("all", "primary"):
++            raise ValueError("stress_policy must be 'all' or 'primary'")
++        try:
++            from phonodist import compare_pronunciations, get_profile
++        except ImportError as exc:
++            raise EquivalenceConfigurationError(
++                "phonodist equivalence requires the optional 'phonetic' extra"
++            ) from exc
++        try:
++            get_profile(self.language)
++        except Exception as exc:
++            raise EquivalenceConfigurationError(
++                f"phonodist has no supported language profile for {self.language!r}"
++            ) from exc
++        object.__setattr__(self, "_compare_pronunciations", compare_pronunciations)
++
++    def compare(self, left: str, right: str) -> Any:
++        """Return an explained structural comparison (errors are handled by discovery)."""
++        return self._compare_pronunciations(
++            left,
++            right,
++            language=self.language,
++            explain=True,
++        )
++
++    def evaluate(self, left: str, right: str) -> tuple[bool, Any]:
++        """Return the safe decision and the comparison used to make it."""
++        comparison = self.compare(left, right)
++        return self.equivalent_comparison(comparison), comparison
++
++    def equivalent(self, left: str, right: str) -> bool:
++        return self.equivalent_comparison(self.compare(left, right))
++
++    def equivalent_comparison(self, comparison: Any) -> bool:
++        if self.stress_policy == "all":
++            if not comparison.stress_equal:
++                return False
++        else:
++            source_primary = tuple(
++                event for event in comparison.source.stress if event.kind == "primary"
++            )
++            target_primary = tuple(
++                event for event in comparison.target.stress if event.kind == "primary"
++            )
++            if source_primary != target_primary:
++                return False
++
++        if comparison.segment_equal:
++            return True
++        if comparison.segmental.distance != 0.0:
++            return False
++
++        approved_operations = 0
++        for operation in comparison.segmental.operations:
++            if operation.kind == "match":
++                continue
++            if not (
++                operation.kind == "sequence_equivalence"
++                and operation.cost == 0.0
++                and operation.reason in APPROVED_ZERO_COST_NOTATION_RULES
++            ):
++                return False
++            approved_operations += 1
++        return approved_operations > 0
+diff --git a/pronresolve/models.py b/pronresolve/models.py
+index 8583763..9b6f89b 100644
+--- a/pronresolve/models.py
++++ b/pronresolve/models.py
+@@ -7,7 +7,13 @@ from collections.abc import Mapping
+ from dataclasses import dataclass
+ from typing import Any
+
+-from .normalization import normalize_ipa, normalize_pos, normalize_word, tokens
++from .normalization import (
++    _is_pronunciation_candidate,
++    normalize_ipa,
++    normalize_pos,
++    normalize_word,
++    tokens,
++)
+
+ INDEX_SCHEMA_VERSION = 2
+
+@@ -95,6 +101,8 @@ class ReadingProfile:
+         ipa = normalize_ipa(self.ipa)
+         if not ipa:
+             raise ValueError("profile.ipa must be a non-empty scalar string")
++        if not _is_pronunciation_candidate(ipa):
++            raise ValueError("profile.ipa must contain a segment-like Unicode letter")
+         if not isinstance(self.sense_ids, tuple) or any(
+             not isinstance(item, str) for item in self.sense_ids
+         ):
+@@ -295,6 +303,11 @@ class DiscoveryReport:
+     entries_without_pos: int = 0
+     unlinked_keys: tuple[str, ...] = ()
+
++    invalid_pronunciation_values: int = 0
++    equivalent_pronunciation_keys: int = 0
++    equivalence_comparisons: int = 0
++    equivalence_errors: int = 0
++
+     def as_dict(self) -> dict[str, Any]:
+         return {
+             "entries_scanned": self.entries_scanned,
+@@ -306,6 +319,10 @@ class DiscoveryReport:
+             "entries_without_pronunciation": self.entries_without_pronunciation,
+             "entries_without_pos": self.entries_without_pos,
+             "unlinked_keys": list(self.unlinked_keys),
++            "invalid_pronunciation_values": self.invalid_pronunciation_values,
++            "equivalent_pronunciation_keys": self.equivalent_pronunciation_keys,
++            "equivalence_comparisons": self.equivalence_comparisons,
++            "equivalence_errors": self.equivalence_errors,
+         }
+
+
+@@ -313,6 +330,7 @@ class DiscoveryReport:
+ class DiscoveryResult:
+     index: AmbiguityIndex
+     report: DiscoveryReport
++    equivalence_audit: tuple[dict[str, Any], ...] = ()
+
+
+ @dataclass(frozen=True, slots=True)
+diff --git a/pronresolve/normalization.py b/pronresolve/normalization.py
+index 26b276e..6cb62f2 100644
+--- a/pronresolve/normalization.py
++++ b/pronresolve/normalization.py
+@@ -83,6 +83,14 @@ def normalize_ipa(value: str) -> str:
+     return normalized.strip()
+
+
++def _is_pronunciation_candidate(value: str) -> bool:
++    """Return whether normalized text contains at least one Unicode letter.
++
++    This deliberately screens obvious placeholders; it is not an IPA validator.
++    """
++    return any(unicodedata.category(char).startswith("L") for char in value)
++
++
+ def tokens(value: str) -> tuple[str, ...]:
+     return tuple(normalize_word(value[start:end]) for start, end in _word_ranges(value or ""))
+
+diff --git a/pyproject.toml b/pyproject.toml
+index e7a4228..ee9c1d0 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -27,6 +27,7 @@ classifiers = [
+ [project.optional-dependencies]
+ dev = ["pytest>=8", "build>=1", "mypy>=1.11", "ruff==0.17.2"]
+ docs = ["sphinx>=7", "myst-parser>=3", "sphinx-rtd-theme>=2"]
++phonetic = ["phonodist>=0.1,<0.2"]
+
+ [project.scripts]
+ pronresolve = "pronresolve.cli:main"
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index e48ca0c..a5ac117 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -224,3 +224,126 @@ def test_module_help_smoke():
+     )
+     assert result.returncode == 0
+     assert "usage: pronresolve" in result.stdout.lower()
++
++
++def test_build_phonodist_writes_structural_audit_and_report(tmp_path, capsys, monkeypatch):
++    from types import SimpleNamespace
++
++    import pronresolve.cli as cli
++
++    created = {}
++
++    class FakePhonodistEquivalence:
++        def __init__(self, *, language, stress_policy):
++            created["configuration"] = (language, stress_policy)
++
++        def evaluate(self, left, right):
++            comparison = SimpleNamespace(
++                segmental=SimpleNamespace(distance=0.05, operations=()),
++                classification="segmental",
++                stress_operations=(),
++            )
++            return False, comparison
++
++    monkeypatch.setattr(cli, "PhonodistEquivalence", FakePhonodistEquivalence)
++    source = tmp_path / "entries.jsonl"
++    source.write_text(
++        "\n".join(json.dumps(_entry(ipa, ipa)) for ipa in ("liːd", "lɛd")) + "\n",
++        encoding="utf-8",
++    )
++    output_path = tmp_path / "index.json"
++    audit_path = tmp_path / "audit.json"
++
++    status, output = _run_cli(
++        capsys,
++        [
++            "build",
++            "--input-jsonl",
++            str(source),
++            "--output",
++            str(output_path),
++            "--language",
++            "de-DE",
++            "--pronunciation-equivalence",
++            "phonodist",
++            "--stress-policy",
++            "primary",
++            "--audit-output",
++            str(audit_path),
++        ],
++    )
++
++    assert status == 0
++    assert created["configuration"] == ("de-DE", "primary")
++    assert len(json.loads(output.out)["equivalence_audit"]) > 0
++    audit = json.loads(audit_path.read_text(encoding="utf-8"))
++    assert audit[0]["classification"] == "segmental"
++    assert audit[0]["distance"] == 0.05
++    report = json.loads((tmp_path / "index.json.report.json").read_text(encoding="utf-8"))
++    assert report["equivalence_comparisons"] == 1
++
++
++def test_strict_phonodist_build_records_errors_and_fails_without_index(
++    tmp_path, capsys, monkeypatch
++):
++    import pronresolve.cli as cli
++
++    class BrokenPhonodistEquivalence:
++        def __init__(self, *, language, stress_policy):
++            pass
++
++        def evaluate(self, left, right):
++            raise ValueError("unsupported segment")
++
++        def equivalent(self, left, right):
++            raise ValueError("unsupported segment")
++
++    monkeypatch.setattr(cli, "PhonodistEquivalence", BrokenPhonodistEquivalence)
++    source = tmp_path / "entries.jsonl"
++    source.write_text(
++        "\n".join(json.dumps(_entry(ipa, ipa)) for ipa in ("liːd", "lɛd")) + "\n",
++        encoding="utf-8",
++    )
++    output_path = tmp_path / "index.json"
++
++    status, output = _run_cli(
++        capsys,
++        [
++            "build",
++            "--input-jsonl",
++            str(source),
++            "--output",
++            str(output_path),
++            "--language",
++            "de-DE",
++            "--pronunciation-equivalence",
++            "phonodist",
++            "--strict-equivalence",
++        ],
++    )
++
++    assert status == 2
++    assert "comparison errors occurred: 1" in output.err
++    assert not output_path.exists()
++    report = json.loads((tmp_path / "index.json.report.json").read_text(encoding="utf-8"))
++    assert report["equivalence_errors"] == 1
++
++
++def test_audit_output_requires_phonodist_mode(tmp_path, capsys):
++    status, output = _run_cli(
++        capsys,
++        [
++            "build",
++            "--input-jsonl",
++            str(tmp_path / "absent.jsonl"),
++            "--output",
++            str(tmp_path / "index.json"),
++            "--language",
++            "en",
++            "--audit-output",
++            str(tmp_path / "audit.json"),
++        ],
++    )
++
++    assert status == 2
++    assert "requires --pronunciation-equivalence phonodist" in output.err
+diff --git a/tests/test_discovery.py b/tests/test_discovery.py
+index 8cb1cc8..0e2f59a 100644
+--- a/tests/test_discovery.py
++++ b/tests/test_discovery.py
+@@ -131,3 +131,137 @@ def test_report_counts_entries_without_pronunciation():
+     )
+     assert result.report.entries_scanned == 1
+     assert result.report.entries_without_pronunciation == 1
++
++
++def test_placeholder_pronunciation_is_rejected_and_reported():
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "wʌg", "a bird", "sense-a"),
++            entry("wug", "noun", "…", "missing pronunciation", "sense-b"),
++        ],
++        language="de",
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.invalid_pronunciation_values == 1
++    assert result.report.entries_without_pronunciation == 1
++    assert result.report.non_ambiguous_keys == 1
++
++
++def test_placeholder_in_three_reading_group_leaves_two_profiles():
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "vʊk", "first reading", "sense-a"),
++            entry("wug", "noun", "vuːk", "second reading", "sense-b"),
++            entry("wug", "noun", "…", "missing pronunciation", "sense-c"),
++        ],
++        language="de",
++    )
++
++    assert {profile.ipa for profile in result.index.profiles} == {"vʊk", "vuːk"}
++    assert result.report.invalid_pronunciation_values == 1
++    assert result.report.resolvable_keys == 1
++    assert result.report.as_dict()["invalid_pronunciation_values"] == 1
++
++
++def test_punctuation_only_pronunciations_are_rejected():
++    for placeholder in ("…", "...", "—", "?"):
++        result = discover_ambiguities(
++            [entry("wug", "noun", placeholder, "missing", "sense-a")], language="de"
++        )
++        assert result.index.profiles == ()
++        assert result.report.invalid_pronunciation_values == 1
++
++
++def test_equivalence_suppresses_only_fully_pairwise_equivalent_groups():
++    class AllEquivalent:
++        def equivalent(self, left, right):
++            return True
++
++    rows = [
++        entry("wug", "noun", "a", "first reading", "sense-a"),
++        entry("wug", "noun", "b", "second reading", "sense-b"),
++    ]
++    result = discover_ambiguities(
++        rows,
++        language="en",
++        pronunciation_equivalence=AllEquivalent(),
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.ambiguous_keys == 1
++    assert result.report.equivalent_pronunciation_keys == 1
++    assert result.report.equivalence_comparisons == 1
++    assert result.report.non_ambiguous_keys == 1
++    assert result.report.resolvable_keys == 0
++
++
++def test_equivalence_uses_complete_linkage_not_transitive_chaining():
++    class ChainEquivalence:
++        equivalent_pairs = {frozenset(("a", "b")), frozenset(("b", "c"))}
++
++        def equivalent(self, left, right):
++            return frozenset((left, right)) in self.equivalent_pairs
++
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "a", "first reading", "sense-a"),
++            entry("wug", "noun", "b", "second reading", "sense-b"),
++            entry("wug", "noun", "c", "third reading", "sense-c"),
++        ],
++        language="en",
++        pronunciation_equivalence=ChainEquivalence(),
++    )
++
++    assert {profile.ipa for profile in result.index.profiles} == {"a", "b", "c"}
++    assert result.report.equivalence_comparisons == 3
++    assert result.report.equivalent_pronunciation_keys == 0
++
++
++def test_equivalence_errors_fail_closed_and_are_counted():
++    class BrokenEquivalence:
++        def equivalent(self, left, right):
++            raise ValueError("unsupported test IPA")
++
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "a", "first reading", "sense-a"),
++            entry("wug", "noun", "b", "second reading", "sense-b"),
++        ],
++        language="en",
++        pronunciation_equivalence=BrokenEquivalence(),
++    )
++
++    assert len(result.index.profiles) == 2
++    assert result.report.equivalence_comparisons == 1
++    assert result.report.equivalence_errors == 1
++    assert result.report.equivalent_pronunciation_keys == 0
++
++
++def test_phonodist_unsupported_comparison_is_audited_and_fails_closed():
++    import pytest
++
++    pytest.importorskip("phonodist")
++    from pronresolve import PhonodistEquivalence
++
++    rows = [
++        entry("wug", "noun", "#p", "first reading", "sense-a"),
++        entry("wug", "noun", "p", "second reading", "sense-b"),
++    ]
++    forward = discover_ambiguities(
++        rows,
++        language="de-DE",
++        pronunciation_equivalence=PhonodistEquivalence("de-DE"),
++        include_equivalence_audit=True,
++    )
++    reversed_result = discover_ambiguities(
++        reversed(rows),
++        language="de-DE",
++        pronunciation_equivalence=PhonodistEquivalence("de-DE"),
++        include_equivalence_audit=True,
++    )
++
++    assert len(forward.index.profiles) == 2
++    assert forward.report.equivalence_errors == 1
++    assert forward.equivalence_audit == reversed_result.equivalence_audit
++    assert "error" in forward.equivalence_audit[0]
+diff --git a/tests/test_equivalence.py b/tests/test_equivalence.py
+new file mode 100644
+index 0000000..78ba034
+--- /dev/null
++++ b/tests/test_equivalence.py
+@@ -0,0 +1,81 @@
++import sys
++from types import SimpleNamespace
++
++import pytest
++
++from pronresolve.equivalence import (
++    EquivalenceConfigurationError,
++    ExactEquivalence,
++    PhonodistEquivalence,
++)
++
++
++def test_exact_equivalence_uses_pronresolve_normalization_only():
++    policy = ExactEquivalence()
++    assert policy.equivalent("/p/", "p")
++    assert not policy.equivalent("ts", "t͡s")
++
++
++def test_missing_phonodist_extra_has_configuration_error(monkeypatch):
++    monkeypatch.setitem(sys.modules, "phonodist", None)
++    with pytest.raises(EquivalenceConfigurationError, match="optional 'phonetic' extra"):
++        PhonodistEquivalence("de-DE")
++
++
++def test_zero_cost_generic_feature_substitution_is_not_notation_identity():
++    operation = SimpleNamespace(
++        kind="substitute",
++        cost=0.0,
++        reason="feature vectors happen to match",
++    )
++    comparison = SimpleNamespace(
++        stress_equal=True,
++        source=SimpleNamespace(stress=()),
++        target=SimpleNamespace(stress=()),
++        segment_equal=False,
++        segmental=SimpleNamespace(distance=0.0, operations=(operation,)),
++    )
++    policy = object.__new__(PhonodistEquivalence)
++    object.__setattr__(policy, "stress_policy", "all")
++
++    assert not policy.equivalent_comparison(comparison)
++
++
++def test_german_prefix_primary_stress_is_never_collapsed():
++    pytest.importorskip("phonodist")
++    left = "ʊmˈfaːʁən"
++    right = "ˈʊmˌfaːʁən"
++
++    assert not PhonodistEquivalence("de-DE", "all").equivalent(left, right)
++    assert not PhonodistEquivalence("de-DE", "primary").equivalent(left, right)
++
++
++def test_secondary_stress_is_ignored_only_in_primary_mode():
++    pytest.importorskip("phonodist")
++    left = "ˈaˌpa"
++    right = "ˈapa"
++
++    assert not PhonodistEquivalence("de-DE", "all").equivalent(left, right)
++    assert PhonodistEquivalence("de-DE", "primary").equivalent(left, right)
++
++
++def test_german_affricate_notation_is_explicitly_equivalent():
++    pytest.importorskip("phonodist")
++    policy = PhonodistEquivalence("de-DE")
++
++    assert policy.equivalent("t͡s", "ts")
++
++
++def test_nonzero_schwa_syllabic_consonant_rule_is_not_equivalent():
++    pytest.importorskip("phonodist")
++    policy = PhonodistEquivalence("de-DE")
++    comparison = policy.compare("n̩", "ən")
++
++    assert comparison.segmental.distance > 0.0
++    assert not policy.equivalent_comparison(comparison)
++
++
++def test_unsupported_profile_is_a_configuration_error():
++    pytest.importorskip("phonodist")
++    with pytest.raises(EquivalenceConfigurationError, match="no supported language profile"):
++        PhonodistEquivalence("xx-XX")
+diff --git a/tests/test_models.py b/tests/test_models.py
+index 419310a..ceaeb6e 100644
+--- a/tests/test_models.py
++++ b/tests/test_models.py
+@@ -55,3 +55,10 @@ def test_runtime_model_rejects_non_scalar_ipa_and_duplicate_cues():
+     value["entries"]["read"]["VERB"][0]["ipa"] = ["ɹiːd"]
+     with pytest.raises(ValueError, match="ipa must be a non-empty string"):
+         AmbiguityIndex.from_dict(value)
++
++
++def test_runtime_model_rejects_punctuation_only_ipa():
++    from pronresolve.models import ReadingProfile
++
++    with pytest.raises(ValueError, match="segment-like Unicode letter"):
++        ReadingProfile(word="ellipsis", pos="noun", reading_id="r1", ipa="…")

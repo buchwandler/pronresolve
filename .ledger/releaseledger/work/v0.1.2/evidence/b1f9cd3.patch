@@ -1,0 +1,2562 @@
+ README.md                  |  22 +--
+ docs/api.md                |   2 +-
+ docs/index.md              |  18 +-
+ pronresolve/__init__.py    |  35 +++-
+ pronresolve/cli.py         |  45 ++++-
+ pronresolve/compile.py     |  55 ++++++
+ pronresolve/discovery.py   | 458 +++++++++++++++++++++++++++++++++++++--------
+ pronresolve/equivalence.py | 116 +++++++++++-
+ pronresolve/models.py      | 310 +++++++++++++++++++++++++++---
+ pronresolve/resolver.py    |   2 +-
+ pronresolve/storage.py     |  52 ++++-
+ tests/test_cli.py          |  96 +++++++++-
+ tests/test_compilation.py  |  38 +++-
+ tests/test_discovery.py    | 187 +++++++++++++++++-
+ tests/test_equivalence.py  |  48 +++++
+ tests/test_identity.py     | 105 +++++++++++
+ tests/test_models.py       |   2 +-
+ tests/test_resolver.py     |   7 +
+ tests/test_schema_v2.py    |   1 +
+ tests/test_schema_v3.py    | 139 ++++++++++++++
+ tests/test_storage.py      |   1 +
+ 21 files changed, 1576 insertions(+), 163 deletions(-)
+
+diff --git a/README.md b/README.md
+index 5e089bd..cb1ad7f 100644
+--- a/README.md
++++ b/README.md
+@@ -34,10 +34,10 @@ pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
+   --strict-equivalence --audit-output de-equivalence-audit.json
+ ```
+
+-Phonodist mode compares structure rather than treating a zero feature distance as identity. `all` preserves primary and secondary stress (the default); `primary` still preserves primary stress but may ignore secondary-stress differences. Discovery suppresses a candidate group only when every exact-IPA pair is equivalent. Otherwise it keeps the original IPA candidates and reading IDs; unsupported comparisons fail closed and are counted. Only exact structure and the explicitly allowlisted zero-cost German affricate-notation rule can be equivalent.
++Phonodist mode compares structure rather than treating a zero feature distance as identity. `all` preserves primary and secondary stress (the default); `primary` may ignore secondary stress. Discovery merges only safe pairwise-equivalent cliques; comparator errors and non-transitive components remain unresolved. Resolution IDs are semantic `r2` IDs and do not depend on IPA.
+
+-The sibling `.report.json` records `invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, and `equivalence_errors`. `--strict-equivalence` aborts if any comparison errors occur. The optional audit is a separate, sorted JSON file containing structural details for remaining ambiguity pairs; it does not change the runtime index or make distance-based decisions. Phonodist is loaded only for this explicit build-time mode: runtime consumers remain dependency-free and the runtime schema stays v2.
+-The build pipeline streams dictionary-entry mappings or objects into `discover_ambiguities()`. The package groups by normalized spelling and POS, normalizes pronunciations, and generates stable reading IDs.
++The sibling `.report.json` records pronunciation, equivalence, semantic-anchor, and contrastive-cue outcomes, including structured unresolved reasons. `--strict-equivalence` aborts if comparisons fail. The optional audit is a separate, sorted build-only file. Phonodist remains optional; runtime consumers use deterministic schema v3 without it.
++Discovery groups by normalized `(word, POS)`, safely partitions pronunciation equivalence classes, merges evidence within each class, and creates `r2` IDs from explicit semantic anchors rather than IPA or cues. Missing or overlapping anchors are unresolved. A curated anchor overlay may supply reviewed semantic keys when stable source sense IDs are absent.
+
+ ```python
+ from pronresolve import discover_ambiguities, save_index
+@@ -47,7 +47,7 @@ save_index(result.index, "en-us.pronresolve.json")
+ print(result.report.as_dict())
+ ```
+
+-A key with only one IPA is not ambiguous. Multiple IPA values on one source entry are treated as unlinked ambiguity and omitted rather than guessed. Entries with missing or empty POS are excluded from automatic resolution and counted in `entries_without_pos` in the discovery report. Missing pronunciation is also counted separately.
++A same-word/POS group with one final pronunciation-equivalence class is not a runtime ambiguity. Groups with multiple classes are emitted only when they have safe semantic anchors and contrastive cues; entries with missing POS are excluded and counted. Multiple IPA values on a source entry without safe sense linkage are unresolved rather than guessed.
+
+ ## Runtime resolution
+
+@@ -66,7 +66,7 @@ decision = resolver.resolve(
+ )
+ if decision is not None:
+     selector = decision.selector
+-    ipa = decision.ipa
++    anchor_ipa = decision.anchor_ipa
+ ```
+
+ A `None` result means the existing default pronunciation path should remain in use. The resolver is deterministic and explainable, not a claim of linguistic certainty.
+@@ -80,11 +80,11 @@ pronresolve inspect index.json [--word WORD]
+ pronresolve validate index.json
+ ```
+
+-`build` reads one JSON object per non-empty JSONL line and writes a compact v2 index plus `<output>.report.json`. `inspect` prints summary counts; add `--word WORD` to view each reading's IPA, sense IDs, and weighted cues. `validate` accepts v1 and v2. Invalid input or an invalid index returns exit code `2` and writes a concise `pronresolve: error: ...` message to stderr.
++`build` reads JSONL and writes schema v3 plus `<output>.report.json`. `--rules-id` sets the shared ruleset identifier; `--curated-anchors` loads a reviewed JSON overlay, and `--identity-audit-output` writes semantic provenance separately. `inspect` shows IDs, diagnostic anchor IPA, and cues. `validate` accepts v1, v2, and v3; legacy IDs are never reidentified on load.
+
+ ## What pronresolve stores
+
+-The resolver index is a compact decision artifact, not a copy of dictionary records. Schema v2 groups candidates by normalized word and POS. Each runtime reading profile contains a reading ID, scalar IPA, sense IDs, and normalized cue tokens grouped by weight. Raw gloss, synonym, topic, tag, antonym, example, and etymology prose is not stored in runtime profiles.
++The runtime index is compact and contains resolution-class IDs, deterministic `anchor_ipa` representatives, and normalized cue tokens grouped by weight. It does not contain semantic anchors, sense IDs, or raw dictionary prose; discovery identity provenance belongs in build/audit records.
+
+ ### Policy B runtime scoring
+
+@@ -100,15 +100,15 @@ Examples are excluded from runtime scoring and serialized cues. They are disprop
+
+ ### Schema compatibility
+
+-New indexes are written as compact, deterministic schema v2 JSON. The loader also accepts schema v1, compiles its synonyms, glosses, topics, tags, and antonyms into Policy B cues, and deliberately ignores examples and etymology numbers for runtime resolution. Therefore v1 scores are not guaranteed to match the previous resolver when examples contributed evidence.
++New builds write schema v3 with `id_version: 2`. The loader accepts schema v1 and v2 during migration; v1 is compiled to the legacy schema-v2 runtime model, and v2 load/save remains schema v2 unless explicitly requested. Neither path changes old IDs. An explicit v3 write requires valid `r2` IDs.
+
+-The runtime `ReadingProfile` API intentionally changed: IPA is scalar and lexical evidence is exposed as compiled `Cue` values instead of raw prose fields. `Resolution.ipa` is also scalar. Callers should use the returned `sense_ids`, `evidence_terms`, and reading ID for runtime explanation and selection.
++`ReadingProfile.anchor_ipa` is the deterministic diagnostic representative, not the target lexicon pronunciation. `ReadingProfile.ipa` and `Resolution.ipa` remain compatibility aliases; use `anchor_ipa` in new integrations. Schema v3 does not store source sense IDs or semantic anchors in the runtime artifact.
+
+-Schema-v2 JSON uses `schema_version`, `language`, `locale`, and an `entries` object grouped as `word -> POS -> candidates`; each candidate stores `id`, scalar `ipa`, optional `sense_ids`, and `cues` grouped by weight. Unsupported versions and malformed structures are rejected. Dataset/version identity belongs to the containing lexicon package or artifact metadata, not the index JSON; publish the index beside its matching pronunciation lexicon.
++Schema-v3 JSON includes `schema_version`, `id_version`, `rules_id`, `language`, `locale`, and `entries` grouped as `word -> POS -> candidates`. Each candidate stores `id`, diagnostic `anchor_ipa`, and `cues`. The ID represents a semantic pronunciation-resolution class; target assets must bind it to their own native pronunciation values and must not compare them with `anchor_ipa`.
+
+ ## Integration boundary
+
+-The producer supplies dictionary entries and locale-filtered source data. Consumers load the generated index, pass token spans/context to the resolver, and apply the returned `READING:<reading_id>` selector through their existing selector-aware lookup. Locale is stored as metadata only; runtime locale filtering is not performed here.
++The producer supplies source data and locale-specific shared rules. Consumers pass token offsets/context to the resolver, then bind `READING:<r2-id>` to target-native pronunciation values. Never compare target values with `anchor_ipa` or regenerate IDs from target encodings.
+
+ ## Limitations
+
+diff --git a/docs/api.md b/docs/api.md
+index c759bb4..88b4c57 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -12,4 +12,4 @@ The following objects are exported from the top-level `pronresolve` package.
+
+ The top-level package exports `PronunciationEquivalence`, `ExactEquivalence`, `PhonodistEquivalence`, and `EquivalenceConfigurationError`. Exact comparison is the default discovery behavior; pass an explicit `PhonodistEquivalence(language=..., stress_policy="all"|"primary")` to enable structural filtering. Constructing that optional policy loads phonodist and requires the `phonetic` extra. It is not needed by index loaders or runtime resolution.
+
+-`DiscoveryReport.as_dict()` includes invalid-pronunciation, equivalence-comparison, comparison-error, and suppressed-equivalent-key counters. `DiscoveryResult.equivalence_audit` contains the optional build-only audit records. These additions do not alter schema-v2 index serialization or runtime dependencies.
++`DiscoveryReport.as_dict()` includes pronunciation, equivalence, semantic-anchor, contrastive-cue, and unresolved-reason metrics. `DiscoveryResult.equivalence_audit` and `identity_audit` contain build-only provenance. Schema-v3 runtime JSON remains dependency-light. The top-level package also exports `SemanticAnchor`, `SemanticIdentity`, `UnresolvedAmbiguity`, `reading_id_v2`, the partition API, and explicit v2/v3 codecs.
+diff --git a/docs/index.md b/docs/index.md
+index ae89c64..706987a 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -15,7 +15,7 @@ Install the published package with `python -m pip install pronresolve`. To build
+
+ ## Concept
+
+-The package separates offline discovery from runtime resolution. Discovery safely links readings to source senses, then compiles useful evidence into normalized weighted cues. Schema-v2 indexes group candidates by normalized word and POS; runtime resolution matches sentence tokens directly against precompiled cues without dictionary-service access or repeated profile tokenization.
++The package separates offline discovery from runtime resolution. Discovery groups by normalized `(word, POS)`, safely links senses, partitions spoken-equivalent pronunciations, constructs semantic resolution classes, and compiles contrastive weighted cues. Schema-v3 `r2` IDs identify those classes independently of IPA; runtime scoring remains deterministic and dependency-light.
+
+ ## Discovery pipeline
+
+@@ -32,14 +32,14 @@ pronresolve build --input-jsonl german.jsonl --output de.json --language de \\
+   --strict-equivalence --audit-output de-equivalence-audit.json
+ ```
+
+-The `all` stress policy (default) preserves primary and secondary stress. `primary` may ignore secondary stress, but never primary stress. Suppression is all-or-nothing: every pair of exact-IPA candidates must be equivalent or all original candidates and reading IDs remain. Comparisons fail closed when unsupported, and only exact structure or the allowlisted zero-cost German affricate-notation operation can be accepted; a zero feature distance alone is not an equivalence decision.
++The `all` stress policy preserves primary and secondary stress. `primary` may ignore secondary stress, but never primary stress. Discovery merges only safe pairwise-equivalent cliques; comparator errors and non-transitive components are unresolved. IDs are semantic `r2` values, and only explicit structural equivalence rules may merge pronunciations.
+
+-The build report adds placeholder and comparison counters (`invalid_pronunciation_values`, `equivalent_pronunciation_keys`, `equivalence_comparisons`, `equivalence_errors`). `--strict-equivalence` fails the build on comparison errors. `--audit-output` writes separate, sorted structural details for remaining ambiguity pairs; it does not affect candidate selection or runtime JSON. The optional phonodist import is build-time only. Runtime consumers retain the dependency-free schema-v2 contract.
+-Call `discover_ambiguities(entries, language="en", locale="en-US")` with a reusable iterable or streaming iterator of mapping- or object-shaped entries. Entries with missing/empty POS are excluded from automatic resolution and reported in `DiscoveryReport.entries_without_pos`. Missing pronunciation is counted separately. If one source entry contains multiple distinct IPA values, its senses cannot safely be linked to an individual IPA, so the key is reported as unlinked rather than guessed.
++The build report records pronunciation, equivalence, semantic-anchor, and contrastive-cue outcomes with structured unresolved reasons. `--strict-equivalence` fails on comparison errors. `--audit-output` writes separate sorted build-only details. Phonodist remains optional; runtime consumers use dependency-free schema v3.
++Call `discover_ambiguities(entries, language="en", locale="en-US")` with mapping- or object-shaped entries. Discovery resolves only same-word/POS ambiguities. Missing POS and pronunciation are reported; multiple pronunciations on one source entry remain unlinked unless explicit safe linkage exists. Every emitted class needs a disjoint stable semantic anchor (source sense IDs or an explicit curated overlay); glosses, cues, and IPA never become identity.
+
+ ## Runtime resolution
+
+-Use `Resolver.from_path(index_path)` and `resolve(text, start, end, pos=..., lemma=...)`. Offsets refer to original sentence character positions. The resolver scores normalized context tokens against precompiled weighted cues and returns a `Resolution` or `None`. Matched cue tokens and sense IDs provide runtime explanation without retaining dictionary prose. Abstention is intentional when the word is unknown, cues are absent, the best score is too weak, or the top candidates are too close.
++Use `Resolver.from_path(index_path)` and `resolve(text, start, end, pos=..., lemma=...)`. Offsets refer to original sentence character positions. The resolver scores normalized context tokens against precompiled contrastive cues and returns a `Resolution` or `None`. Matched cue tokens, the semantic reading ID, and the anchor IPA provide runtime diagnostics without storing dictionary prose or semantic provenance. Abstention is intentional when the word is unknown, cues are absent, the best score is too weak, or the top candidates are too close.
+
+ `resolve_token()` accepts mappings and spaCy-like token objects. POS and lemma are optional; if POS is omitted where the index has multiple POS groups, resolution abstains.
+
+@@ -51,7 +51,7 @@ The default score and margin thresholds are heuristic. Context matching ignores
+
+ ## What the runtime stores
+
+-The compact v2 runtime index is a decision artifact, not a dictionary-record copy. It groups candidates as `word -> POS -> readings`; each reading stores an ID, scalar IPA, optional sense IDs, and cues grouped by weight. Raw glosses, synonyms, topics, tags, antonyms, examples, and etymology numbers are not retained in runtime profiles.
++The compact schema-v3 artifact groups candidates as `word -> POS -> readings`; each candidate stores a semantic `r2` ID, diagnostic `anchor_ipa`, and cues grouped by weight. It deliberately omits sense IDs, semantic anchors, and raw dictionary prose; provenance belongs in build/audit records.
+
+ ## Policy B scoring
+
+@@ -67,15 +67,15 @@ Examples are excluded from compiled cues, the runtime index, and scoring. They a
+
+ ## Schema compatibility
+
+-New indexes are written as compact deterministic schema v2 JSON. The loader accepts both v1 and v2; loading v1 compiles synonyms, glosses, topics, tags, and antonyms into Policy B cues, ignores examples and etymology numbers for runtime, preserves sense IDs, and normalizes a validated one-pronunciation IPA array to scalar IPA. This intentionally does not guarantee legacy v1 score parity when examples affected the old resolver. The runtime `ReadingProfile` and `Resolution.ipa` shapes intentionally use scalar IPA and compiled cues instead of raw evidence prose.
++New builds write schema v3 with `id_version: 2`. The loader accepts v1 and v2 during migration; v1 becomes a schema-v2 runtime model after cue compilation, while v2 load/save stays schema v2 unless explicitly requested. Neither loader reidentifies old IDs; an explicit v3 write requires valid `r2` IDs.
+
+ ## CLI
+
+-`pronresolve build --input-jsonl entries.jsonl --output index.json --language en` writes a compact v2 index and sibling `.report.json`. `pronresolve inspect index.json` prints summary counts; add `--word WORD` to see readings, scalar IPA, sense IDs, and weighted cues. `pronresolve validate index.json` accepts v1 and v2. Invalid user input returns exit code 2 with a concise stderr error and no traceback.
++`pronresolve build --input-jsonl entries.jsonl --output index.json --language en` writes schema v3 and a sibling `.report.json`; `--rules-id` sets a shared ruleset identifier, `--curated-anchors` loads reviewed anchor data, and `--identity-audit-output` keeps provenance separate. `inspect` shows IDs, diagnostic anchor IPA, and cues. `validate` accepts v1, v2, and v3.
+
+ ## Integration boundary
+
+-Generate the index beside the matching pronunciation lexicon using correctly filtered source data. The producer owns locale selection and dataset/version metadata. A consuming frontend supplies sentence text, token offsets, and available POS/lemma data, then applies a returned `READING:<reading_id>` selector through its existing lookup path.
++Build rules from correctly filtered locale data. A consuming frontend supplies context and applies the returned `READING:<reading_id>` selector through its existing lookup. Target assets bind `r2` IDs to their native values; `anchor_ipa` is diagnostic and is not a target pronunciation constraint.
+
+ ## Limitations
+
+diff --git a/pronresolve/__init__.py b/pronresolve/__init__.py
+index 16e6c3c..e64d95e 100644
+--- a/pronresolve/__init__.py
++++ b/pronresolve/__init__.py
+@@ -5,12 +5,16 @@ try:
+ except ImportError:  # Source checkout before setuptools-scm has generated _version.py.
+     __version__ = "0+unknown"
+
+-from .discovery import discover_ambiguities, reading_id_for
++from .discovery import discover_ambiguities, reading_id_for, reading_id_v2
+ from .equivalence import (
+     EquivalenceConfigurationError,
++    EquivalencePair,
++    EquivalencePartition,
+     ExactEquivalence,
+     PhonodistEquivalence,
++    PronunciationClass,
+     PronunciationEquivalence,
++    partition_pronunciations,
+ )
+ from .models import (
+     AmbiguityIndex,
+@@ -20,9 +24,23 @@ from .models import (
+     DiscoveryResult,
+     ReadingProfile,
+     Resolution,
++    SemanticAnchor,
++    UnresolvedAmbiguity,
++    SemanticIdentity,
++    INDEX_SCHEMA_VERSION,
++    READING_ID_VERSION,
++    is_reading_id_v2,
+ )
+ from .resolver import Resolver
+-from .storage import decode_v1, decode_v2, encode_v2, load_index, save_index
++from .storage import (
++    decode_v1,
++    decode_v2,
++    decode_v3,
++    encode_v2,
++    encode_v3,
++    load_index,
++    save_index,
++)
+
+ __all__ = [
+     "__version__",
+@@ -41,8 +59,21 @@ __all__ = [
+     "discover_ambiguities",
+     "decode_v1",
+     "decode_v2",
++    "decode_v3",
+     "encode_v2",
++    "encode_v3",
+     "load_index",
+     "reading_id_for",
++    "SemanticAnchor",
++    "SemanticIdentity",
++    "INDEX_SCHEMA_VERSION",
++    "READING_ID_VERSION",
++    "is_reading_id_v2",
++    "reading_id_v2",
++    "EquivalencePair",
++    "EquivalencePartition",
++    "PronunciationClass",
++    "UnresolvedAmbiguity",
++    "partition_pronunciations",
+     "save_index",
+ ]
+diff --git a/pronresolve/cli.py b/pronresolve/cli.py
+index 27e530f..424fe05 100644
+--- a/pronresolve/cli.py
++++ b/pronresolve/cli.py
+@@ -29,6 +29,13 @@ def _jsonl_entries(path: Path) -> Iterable[dict[str, Any]]:
+             yield value
+
+
++def _json_object_array(path: Path) -> list[dict[str, Any]]:
++    value = json.loads(path.read_text(encoding="utf-8"))
++    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
++        raise ValueError(f"{path}: expected a JSON array of objects")
++    return value
++
++
+ def _source_schema_version(path: Path) -> Any:
+     value = json.loads(path.read_text(encoding="utf-8"))
+     return value.get("schema_version") if isinstance(value, dict) else None
+@@ -45,6 +52,9 @@ def _index_summary(index, source_schema_version: Any) -> dict[str, Any]:
+         "runtime_schema_version": index.schema_version,
+         "language": index.language,
+         "locale": index.locale,
++        "id_version": 2 if index.schema_version == 3 else None,
++        "rules_id": index.rules_id,
++        "resolution_class_count": len(profiles),
+         "ambiguous_word_count": word_count,
+         "ambiguous_words": word_count,
+         "word_pos_group_count": len(groups),
+@@ -67,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
+     build.add_argument("--output", required=True, type=Path)
+     build.add_argument("--language", required=True)
+     build.add_argument("--locale")
++    build.add_argument("--rules-id", help="shared ruleset identifier (defaults to locale/language)")
++    build.add_argument(
++        "--curated-anchors",
++        type=Path,
++        help="JSON array of reviewed semantic-anchor overrides",
++    )
+     build.add_argument(
+         "--pronunciation-equivalence",
+         choices=("exact", "phonodist"),
+@@ -89,12 +105,17 @@ def main(argv: list[str] | None = None) -> int:
+         type=Path,
+         help="write sorted structural comparisons for remaining ambiguity pairs",
+     )
++    build.add_argument(
++        "--identity-audit-output",
++        type=Path,
++        help="write semantic identity provenance separately from the runtime index",
++    )
+
+     inspect = subparsers.add_parser("inspect", help="print index summary and optional word details")
+     inspect.add_argument("index", type=Path)
+     inspect.add_argument("--word", help="show readings and weighted cues for one word")
+
+-    validate = subparsers.add_parser("validate", help="validate a v1 or v2 index schema")
++    validate = subparsers.add_parser("validate", help="validate a v1, v2, or v3 index schema")
+     validate.add_argument("index", type=Path)
+
+     args = parser.parse_args(argv)
+@@ -111,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
+             result = discover_ambiguities(
+                 _jsonl_entries(args.input_jsonl),
+                 language=args.language,
++                rules_id=args.rules_id,
++                curated_anchors=(
++                    _json_object_array(args.curated_anchors)
++                    if args.curated_anchors is not None
++                    else None
++                ),
+                 locale=args.locale,
+                 pronunciation_equivalence=equivalence,
+                 include_equivalence_audit=args.audit_output is not None,
+@@ -134,6 +161,19 @@ def main(argv: list[str] | None = None) -> int:
+                     + "\n",
+                     encoding="utf-8",
+                 )
++            if args.identity_audit_output is not None:
++                args.identity_audit_output.parent.mkdir(parents=True, exist_ok=True)
++                identity_records = [identity.to_dict() for identity in result.identity_audit]
++                args.identity_audit_output.write_text(
++                    json.dumps(
++                        identity_records,
++                        ensure_ascii=False,
++                        indent=2,
++                        sort_keys=True,
++                    )
++                    + "\n",
++                    encoding="utf-8",
++                )
+             if args.strict_equivalence and result.report.equivalence_errors:
+                 raise ValueError(
+                     f"phonodist comparison errors occurred: {result.report.equivalence_errors}"
+@@ -147,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
+             }
+             if args.audit_output is not None:
+                 output["equivalence_audit"] = str(args.audit_output)
++            if args.identity_audit_output is not None:
++                output["identity_audit"] = str(args.identity_audit_output)
+             print(json.dumps(output, ensure_ascii=False, indent=2))
+             return 0
+
+@@ -161,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
+                     "word": profile.word,
+                     "pos": profile.pos,
+                     "reading_id": profile.reading_id,
++                    "anchor_ipa": profile.anchor_ipa,
+                     "ipa": profile.ipa,
+                     "sense_ids": list(profile.sense_ids),
+                     "weighted_cues": _weighted_cues(profile),
+diff --git a/pronresolve/compile.py b/pronresolve/compile.py
+index 485abf4..052af5b 100644
+--- a/pronresolve/compile.py
++++ b/pronresolve/compile.py
+@@ -2,6 +2,7 @@
+
+ from __future__ import annotations
+
++from dataclasses import dataclass
+ from collections.abc import Iterable, Mapping
+
+ from .models import Cue
+@@ -39,3 +40,57 @@ def compile_cues(evidence: Mapping[str, Iterable[str]]) -> tuple[Cue, ...]:
+                     continue
+                 weights[token] = max(weights.get(token, 0.0), weight)
+     return tuple(Cue(token=token, weight=weights[token]) for token in sorted(weights))
++
++
++@dataclass(frozen=True, slots=True)
++class ContrastiveCueCompilation:
++    """Cue maps pruned against a complete candidate group."""
++
++    cue_sets: tuple[tuple[Cue, ...], ...]
++    shared_tokens: tuple[str, ...] = ()
++    reason: str | None = None
++
++    @property
++    def selectable(self) -> bool:
++        return self.reason is None
++
++
++def compile_contrastive_cues(
++    candidates: Iterable[Iterable[Cue]],
++) -> ContrastiveCueCompilation:
++    """Drop universally shared cues and fail closed on non-selectable groups."""
++    candidate_cues = tuple(tuple(candidate) for candidate in candidates)
++    if len(candidate_cues) < 2:
++        raise ValueError("contrastive cue compilation requires at least two candidates")
++    if any(any(not isinstance(cue, Cue) for cue in candidate) for candidate in candidate_cues):
++        raise ValueError("contrastive cue candidates must contain Cue values")
++
++    candidate_maps: list[dict[str, float]] = []
++    for candidate in candidate_cues:
++        cue_map: dict[str, float] = {}
++        for cue in candidate:
++            cue_map[cue.token] = max(cue_map.get(cue.token, 0.0), cue.weight)
++        candidate_maps.append(cue_map)
++
++    shared_tokens = tuple(sorted(set.intersection(*(set(cue_map) for cue_map in candidate_maps))))
++    shared = set(shared_tokens)
++    pruned_maps = [
++        {token: weight for token, weight in cue_map.items() if token not in shared}
++        for cue_map in candidate_maps
++    ]
++    cue_sets = tuple(
++        tuple(Cue(token=token, weight=cue_map[token]) for token in sorted(cue_map))
++        for cue_map in pruned_maps
++    )
++    signatures = [tuple((cue.token, cue.weight) for cue in cues) for cues in cue_sets]
++    if len(set(signatures)) != len(signatures):
++        reason = "non_discriminative_rules"
++    elif any(not cues for cues in cue_sets):
++        reason = "insufficient_contrastive_evidence"
++    else:
++        reason = None
++    return ContrastiveCueCompilation(
++        cue_sets=cue_sets,
++        shared_tokens=shared_tokens,
++        reason=reason,
++    )
+diff --git a/pronresolve/discovery.py b/pronresolve/discovery.py
+index b2b1ab6..6c046ad 100644
+--- a/pronresolve/discovery.py
++++ b/pronresolve/discovery.py
+@@ -7,13 +7,26 @@ import json
+ import re
+ import unicodedata
+ from collections import defaultdict
+-from itertools import combinations
+ from collections.abc import Iterable, Mapping
+ from typing import Any
+
+-from .compile import compile_cues
+-from .equivalence import PronunciationEquivalence
+-from .models import AmbiguityIndex, DiscoveryReport, DiscoveryResult, ReadingProfile
++from .compile import compile_contrastive_cues, compile_cues
++from .equivalence import (
++    EquivalencePartition,
++    PronunciationClass,
++    PronunciationEquivalence,
++    partition_pronunciations,
++)
++from .models import (
++    AmbiguityIndex,
++    Cue,
++    DiscoveryReport,
++    DiscoveryResult,
++    ReadingProfile,
++    SemanticAnchor,
++    SemanticIdentity,
++    UnresolvedAmbiguity,
++)
+ from .normalization import (
+     _is_pronunciation_candidate,
+     normalize_ipa,
+@@ -164,7 +177,7 @@ def _entry_evidence(entry: Any) -> dict[str, tuple[str, ...]]:
+
+
+ def reading_id_for(language: str, word: str, pos: str, ipa: str) -> str:
+-    """Return a stable ID for a reading, independent of input order."""
++    """Return a stable r1 realization ID for legacy schema compatibility."""
+     lang = _LANG_RE.sub("-", normalize_word(language)).strip("-") or "und"
+     payload = json.dumps(
+         [
+@@ -180,18 +193,140 @@ def reading_id_for(language: str, word: str, pos: str, ipa: str) -> str:
+     return f"r1-{lang}-{digest}"
+
+
++def reading_id_v2(
++    language: str,
++    word: str,
++    pos: str,
++    anchor: SemanticAnchor,
++) -> str:
++    """Return the deterministic semantic pronunciation-class ID (r2)."""
++    if not isinstance(anchor, SemanticAnchor):
++        raise TypeError("anchor must be a SemanticAnchor")
++    if not isinstance(language, str):
++        raise ValueError("language must be a non-empty string")
++    if not isinstance(word, str):
++        raise ValueError("word must be a non-empty string")
++    normalized_language = normalize_word(language)
++    normalized_word = normalize_word(word)
++    if not normalized_language:
++        raise ValueError("language must be non-empty")
++    if not normalized_word:
++        raise ValueError("word must be non-empty")
++    if not isinstance(pos, str) or not pos.strip():
++        raise ValueError("POS must be non-empty")
++    normalized_pos = normalize_pos(pos)
++    lang = _LANG_RE.sub("-", normalized_language).strip("-") or "und"
++    payload = json.dumps(
++        [
++            "pronresolve-reading-v2",
++            normalized_language,
++            normalized_word,
++            normalized_pos,
++            anchor.namespace,
++            list(anchor.keys),
++        ],
++        ensure_ascii=False,
++        separators=(",", ":"),
++    ).encode("utf-8")
++    digest = hashlib.blake2s(payload, digest_size=12, person=b"prnrs2").hexdigest()
++    return f"r2-{lang}-{digest}"
++
++
++def _parse_semantic_anchor(value: Any) -> SemanticAnchor:
++    if isinstance(value, SemanticAnchor):
++        return value
++    if not isinstance(value, Mapping):
++        raise ValueError("semantic_anchor must be an object with namespace and keys")
++    namespace = value.get("namespace")
++    keys = value.get("keys")
++    if not isinstance(keys, (list, tuple)):
++        raise ValueError("semantic_anchor.keys must be an array of strings")
++    return SemanticAnchor(namespace, tuple(keys))
++
++
++def _curated_anchor_overrides(
++    records: Iterable[Mapping[str, Any]] | None,
++) -> dict[tuple[str, str, str], SemanticAnchor]:
++    overrides: dict[tuple[str, str, str], SemanticAnchor] = {}
++    for position, record in enumerate(records or ()):
++        if not isinstance(record, Mapping):
++            raise ValueError(f"curated semantic anchor {position} must be an object")
++        raw_word = record.get("word")
++        raw_pos = record.get("pos")
++        raw_source_id = record.get("source_id")
++        if (
++            not isinstance(raw_word, str)
++            or not raw_word.strip()
++            or not isinstance(raw_pos, str)
++            or not raw_pos.strip()
++            or not isinstance(raw_source_id, str)
++            or not raw_source_id.strip()
++        ):
++            raise ValueError(
++                f"curated semantic anchor {position} requires word, POS, and stable source_id"
++            )
++        word = normalize_word(raw_word)
++        pos = normalize_pos(raw_pos)
++        source_id = unicodedata.normalize("NFC", raw_source_id).strip()
++        key = (word, pos, source_id)
++        anchor = _parse_semantic_anchor(record.get("semantic_anchor"))
++        previous = overrides.get(key)
++        if previous is not None and previous != anchor:
++            raise ValueError(f"conflicting curated semantic anchors for {key!r}")
++        overrides[key] = anchor
++    return overrides
++
++
++def _semantic_anchor_for(
++    rows: list[dict[str, Any]], *, language: str
++) -> tuple[SemanticAnchor | None, str | None]:
++    curated = [row["curated_anchor"] for row in rows if row.get("curated_anchor") is not None]
++    if curated:
++        namespaces = {anchor.namespace for anchor in curated}
++        if len(namespaces) != 1:
++            return None, "semantic_anchor_namespace_conflict"
++        keys = tuple(key for anchor in curated for key in anchor.keys)
++        return SemanticAnchor(next(iter(namespaces)), keys), None
++    sense_ids = _unique_text(sense_id for row in rows for sense_id in row["evidence"]["sense_ids"])
++    if not sense_ids:
++        return None, "missing_semantic_anchor"
++    namespace = f"lexhint:{normalize_word(language)}:dictionary"
++    return SemanticAnchor(namespace, sense_ids), None
++
++
++def _merged_class_evidence(rows: list[dict[str, Any]]) -> dict[str, tuple[str, ...]]:
++    field_names = (
++        "sense_ids",
++        "etymology_numbers",
++        "glosses",
++        "topics",
++        "tags",
++        "examples",
++        "synonyms",
++        "antonyms",
++    )
++    merged: dict[str, list[str]] = {name: [] for name in field_names}
++    for row in rows:
++        for name in field_names:
++            merged[name].extend(row["evidence"][name])
++    return {name: _unique_text(values) for name, values in merged.items()}
++
++
+ def discover_ambiguities(
+     entries: Iterable[Any],
+     *,
+     language: str,
+     locale: str | None = None,
++    rules_id: str | None = None,
+     pronunciation_equivalence: PronunciationEquivalence | None = None,
+     include_equivalence_audit: bool = False,
++    curated_anchors: Iterable[Mapping[str, Any]] | None = None,
+ ) -> DiscoveryResult:
+-    """Scan dictionary-entry objects and create profiles only when sense linkage is safe.
++    """Discover safe semantic choices among same-word, same-POS readings.
+
+-    Entries can be Lexhint ``DictionaryEntry`` instances or mappings with the same
+-    fields. Entries are consumed once, so generators and streaming iterators work.
++    ``curated_anchors`` is a data overlay of records containing ``word``, ``pos``,
++    stable ``source_id``, and ``semantic_anchor: {namespace, keys}``. The source ID
++    selects the input row; the semantic keys, never IPA or prose, determine identity.
+     """
+     if include_equivalence_audit and pronunciation_equivalence is None:
+         raise ValueError("equivalence audit requires a pronunciation equivalence policy")
+@@ -199,6 +334,7 @@ def discover_ambiguities(
+         getattr(pronunciation_equivalence, "evaluate", None)
+     ):
+         raise ValueError("equivalence audit requires a policy that exposes comparison details")
++    overrides = _curated_anchor_overrides(curated_anchors)
+     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+     entries_scanned = 0
+     entries_without_pronunciation = 0
+@@ -221,15 +357,34 @@ def discover_ambiguities(
+         if not pronunciations:
+             entries_without_pronunciation += 1
+             continue
++        evidence = _entry_evidence(entry)
++        raw_source_id = _field(entry, "source_id", _field(entry, "entry_id", _field(entry, "id")))
++        source_id = (
++            unicodedata.normalize("NFC", raw_source_id).strip()
++            if isinstance(raw_source_id, str)
++            else ""
++        )
++        curated_anchor = overrides.get((word, pos, source_id)) if source_id else None
++        direct_anchor = _field(entry, "semantic_anchor")
++        if direct_anchor is not None:
++            parsed_anchor = _parse_semantic_anchor(direct_anchor)
++            if curated_anchor is not None and parsed_anchor != curated_anchor:
++                raise ValueError(
++                    f"conflicting inline and overlay semantic anchors for {word}/{pos}"
++                )
++            curated_anchor = parsed_anchor
+         grouped[(word, pos)].append(
+             {
+                 "word": raw_word,
+                 "pronunciations": pronunciations,
+-                "evidence": _entry_evidence(entry),
++                "evidence": evidence,
++                "curated_anchor": curated_anchor,
+             }
+         )
+
+     profiles: list[ReadingProfile] = []
++    identities: list[SemanticIdentity] = []
++    unresolved: list[UnresolvedAmbiguity] = []
+     ambiguous_keys = 0
+     resolvable_keys = 0
+     unlinked_ambiguity_keys = 0
+@@ -237,22 +392,56 @@ def discover_ambiguities(
+     unlinked_keys: list[str] = []
+     equivalence_comparisons = 0
+     equivalence_errors = 0
++    equivalence_unsafe_keys = 0
+     equivalent_pronunciation_keys = 0
++    missing_semantic_anchor_keys = 0
++    semantic_overlap_keys = 0
++    non_discriminative_keys = 0
+     audit_rows: list[dict[str, Any]] = []
++    unresolved_counts: dict[str, int] = defaultdict(int)
++    identity_by_id: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {}
++
++    def add_unresolved(
++        word: str,
++        pos: str,
++        reason: str,
++        rows: list[dict[str, Any]],
++        *,
++        pronunciations: Iterable[str] = (),
++        details: Mapping[str, Any] | None = None,
++    ) -> None:
++        sense_ids = _unique_text(
++            sense_id for row in rows for sense_id in row["evidence"]["sense_ids"]
++        )
++        unresolved.append(
++            UnresolvedAmbiguity(
++                word=word,
++                pos=pos,
++                reason=reason,
++                pronunciations=tuple(pronunciations),
++                sense_ids=sense_ids,
++                details=dict(details) if details is not None else None,
++            )
++        )
++        unresolved_counts[reason] += 1
+
+     for (normalized_word, pos), entry_rows in sorted(grouped.items()):
+-        all_ipa = {ipa for row in entry_rows for ipa, _tags in row["pronunciations"]}
++        all_ipa = tuple(sorted({ipa for row in entry_rows for ipa, _tags in row["pronunciations"]}))
+         if len(all_ipa) <= 1:
+             non_ambiguous_keys += 1
+             continue
+
+         ambiguous_keys += 1
+-
+-        # An entry carrying multiple IPA values does not tell us which sense maps
+-        # to which IPA. Do not silently attach all its senses to every reading.
+         if any(len(row["pronunciations"]) != 1 for row in entry_rows):
+             unlinked_ambiguity_keys += 1
+             unlinked_keys.append(f"{normalized_word}/{pos}")
++            add_unresolved(
++                normalized_word,
++                pos,
++                "multiple_pronunciations_without_sense_link",
++                entry_rows,
++                pronunciations=all_ipa,
++            )
+             continue
+
+         by_ipa: dict[str, list[dict[str, Any]]] = defaultdict(list)
+@@ -260,73 +449,167 @@ def discover_ambiguities(
+             ipa, _tags = row["pronunciations"][0]
+             by_ipa[ipa].append(row)
+
+-        if len(by_ipa) < 2:
++        if pronunciation_equivalence is None:
++            partition_classes = tuple(PronunciationClass((ipa,)) for ipa in sorted(by_ipa))
++            partition = EquivalencePartition(partition_classes)
++        else:
++            partition = partition_pronunciations(
++                by_ipa,
++                policy=pronunciation_equivalence,
++            )
++            equivalence_comparisons += len(partition.pairwise_audit)
++            equivalence_errors += sum(pair.error is not None for pair in partition.pairwise_audit)
++            if include_equivalence_audit:
++                for pair in partition.pairwise_audit:
++                    if pair.error is not None:
++                        record = {
++                            "word": normalized_word,
++                            "pos": pos,
++                            "ipa_left": pair.left,
++                            "ipa_right": pair.right,
++                            "equivalent": None,
++                            "error": pair.error,
++                        }
++                    else:
++                        record = _comparison_audit_record(
++                            normalized_word,
++                            pos,
++                            pair.left,
++                            pair.right,
++                            comparison=pair.comparison,
++                        )
++                        record["equivalent"] = pair.equivalent
++                    audit_rows.append(record)
++
++        if partition.unsafe:
++            equivalence_unsafe_keys += 1
++            add_unresolved(
++                normalized_word,
++                pos,
++                partition.reason or "equivalence_error",
++                entry_rows,
++                pronunciations=all_ipa,
++                details={
++                    "comparison_errors": sum(
++                        pair.error is not None for pair in partition.pairwise_audit
++                    )
++                },
++            )
++            continue
++        if len(partition.classes) < 2:
++            equivalent_pronunciation_keys += 1
+             non_ambiguous_keys += 1
+             continue
+
+-        group_audit: list[dict[str, Any]] = []
+-        if pronunciation_equivalence is not None:
+-            pair_results: list[bool] = []
+-            evaluate = getattr(pronunciation_equivalence, "evaluate", None)
+-            for left, right in combinations(sorted(by_ipa), 2):
+-                equivalence_comparisons += 1
+-                comparison = None
+-                try:
+-                    if callable(evaluate):
+-                        pair_equivalent, comparison = evaluate(left, right)
+-                    else:
+-                        pair_equivalent = pronunciation_equivalence.equivalent(left, right)
+-                except Exception as exc:
+-                    equivalence_errors += 1
+-                    pair_equivalent = False
+-                    if include_equivalence_audit:
+-                        group_audit.append(
+-                            _comparison_audit_record(normalized_word, pos, left, right, error=exc)
+-                        )
++        class_records: list[
++            tuple[
++                PronunciationClass,
++                list[dict[str, Any]],
++                SemanticIdentity,
++                tuple[Cue, ...],
++            ]
++        ] = []
++        failed = False
++        for pronunciation_class in partition.classes:
++            class_rows = [row for ipa in pronunciation_class.pronunciations for row in by_ipa[ipa]]
++            anchor, anchor_error = _semantic_anchor_for(class_rows, language=language)
++            if anchor is None:
++                missing_semantic_anchor_keys += 1
++                add_unresolved(
++                    normalized_word,
++                    pos,
++                    anchor_error or "missing_semantic_anchor",
++                    class_rows,
++                    pronunciations=pronunciation_class.pronunciations,
++                )
++                failed = True
++                break
++            evidence = _merged_class_evidence(class_rows)
++            source_ipas = pronunciation_class.pronunciations
++            anchor_ipa = min(source_ipas)
++            reading_id = reading_id_v2(language, normalized_word, pos, anchor)
++            identity = SemanticIdentity(
++                reading_id=reading_id,
++                word=normalized_word,
++                pos=pos,
++                semantic_anchor=anchor,
++                sense_ids=evidence["sense_ids"],
++                source_ipas=source_ipas,
++                anchor_ipa=anchor_ipa,
++            )
++            identity_key = (
++                normalize_word(language),
++                normalized_word,
++                pos,
++                anchor.namespace,
++                anchor.keys,
++            )
++            previous_identity = identity_by_id.get(reading_id)
++            if previous_identity is not None and previous_identity != identity_key:
++                raise ValueError(f"r2 reading ID collision for {reading_id}")
++            identity_by_id[reading_id] = identity_key
++            class_records.append(
++                (pronunciation_class, class_rows, identity, compile_cues(evidence))
++            )
++
++        if failed:
++            continue
++
++        key_owners: dict[str, str] = {}
++        overlap: set[str] = set()
++        for _pronunciation_class, _class_rows, identity, _cues in class_records:
++            for key in identity.semantic_anchor.keys:
++                if key in key_owners:
++                    overlap.add(key)
+                 else:
+-                    pair_equivalent = bool(pair_equivalent)
+-                    if include_equivalence_audit:
+-                        group_audit.append(
+-                            _comparison_audit_record(
+-                                normalized_word, pos, left, right, comparison=comparison
+-                            )
+-                        )
+-                pair_results.append(pair_equivalent)
+-            if pair_results and all(pair_results):
+-                equivalent_pronunciation_keys += 1
+-                non_ambiguous_keys += 1
+-                continue
+-            audit_rows.extend(group_audit)
+-        resolvable_keys += 1
+-        # The index key is normalized; using it as the profile word keeps output
+-        # deterministic even when the source contains case variants in different orders.
+-        display_word = normalized_word
+-
+-        for ipa, ipa_rows in sorted(by_ipa.items()):
+-            merged: dict[str, list[str]] = {
+-                "sense_ids": [],
+-                "etymology_numbers": [],
+-                "glosses": [],
+-                "topics": [],
+-                "tags": [],
+-                "examples": [],
+-                "synonyms": [],
+-                "antonyms": [],
+-            }
+-            for row in ipa_rows:
+-                for field_name, values in row["evidence"].items():
+-                    merged[field_name].extend(values)
+-            unique = {name: _unique_text(values) for name, values in merged.items()}
++                    key_owners[key] = identity.reading_id
++        if overlap:
++            semantic_overlap_keys += 1
++            add_unresolved(
++                normalized_word,
++                pos,
++                "semantic_anchor_overlap",
++                entry_rows,
++                pronunciations=all_ipa,
++                details={"overlapping_keys": sorted(overlap)},
++            )
++            continue
++
++        cue_compilation = compile_contrastive_cues(
++            cues for _pronunciation_class, _class_rows, _identity, cues in class_records
++        )
++        if not cue_compilation.selectable:
++            if cue_compilation.reason == "non_discriminative_rules":
++                non_discriminative_keys += 1
++            add_unresolved(
++                normalized_word,
++                pos,
++                cue_compilation.reason or "insufficient_contrastive_evidence",
++                entry_rows,
++                pronunciations=all_ipa,
++                details={"shared_tokens": list(cue_compilation.shared_tokens)},
++            )
++            continue
++        class_records = [
++            (pronunciation_class, class_rows, identity, cue_compilation.cue_sets[position])
++            for position, (pronunciation_class, class_rows, identity, _cues) in enumerate(
++                class_records
++            )
++        ]
++
++        for _pronunciation_class, _class_rows, identity, cues in class_records:
++            identities.append(identity)
+             profiles.append(
+                 ReadingProfile(
+-                    word=display_word,
+-                    pos=pos,
+-                    reading_id=reading_id_for(language, normalized_word, pos, ipa),
+-                    ipa=ipa,
+-                    sense_ids=unique["sense_ids"],
+-                    cues=compile_cues(unique),
++                    word=identity.word,
++                    pos=identity.pos,
++                    reading_id=identity.reading_id,
++                    anchor_ipa=identity.anchor_ipa,
++                    sense_ids=identity.sense_ids,
++                    cues=cues,
+                 )
+             )
++        resolvable_keys += 1
+
+     profiles.sort(
+         key=lambda profile: (
+@@ -336,11 +619,22 @@ def discover_ambiguities(
+             profile.reading_id,
+         )
+     )
++    identities.sort(key=lambda identity: (identity.word, identity.pos, identity.reading_id))
+     index = AmbiguityIndex(
+         language=normalize_word(language),
+         locale=locale,
++        rules_id=rules_id,
+         profiles=tuple(profiles),
+     )
++    audit_rows.sort(
++        key=lambda item: (
++            item.get("distance", float("inf")),
++            item["word"],
++            item["pos"],
++            item["ipa_left"],
++            item["ipa_right"],
++        )
++    )
+     report = DiscoveryReport(
+         entries_scanned=entries_scanned,
+         keys_scanned=len(grouped),
+@@ -350,23 +644,23 @@ def discover_ambiguities(
+         non_ambiguous_keys=non_ambiguous_keys,
+         entries_without_pronunciation=entries_without_pronunciation,
+         entries_without_pos=entries_without_pos,
+-        unlinked_keys=tuple(unlinked_keys),
++        unlinked_keys=tuple(sorted(unlinked_keys)),
+         invalid_pronunciation_values=invalid_pronunciation_values,
+         equivalent_pronunciation_keys=equivalent_pronunciation_keys,
+         equivalence_comparisons=equivalence_comparisons,
+         equivalence_errors=equivalence_errors,
+-    )
+-    audit_rows.sort(
+-        key=lambda item: (
+-            item.get("distance", float("inf")),
+-            item["word"],
+-            item["pos"],
+-            item["ipa_left"],
+-            item["ipa_right"],
+-        )
++        equivalence_unsafe_keys=equivalence_unsafe_keys,
++        missing_semantic_anchor_keys=missing_semantic_anchor_keys,
++        semantic_overlap_keys=semantic_overlap_keys,
++        non_discriminative_keys=non_discriminative_keys,
++        runtime_profile_count=len(profiles),
++        runtime_cue_count=sum(len(profile.cues) for profile in profiles),
++        unresolved_reason_counts=tuple(sorted(unresolved_counts.items())),
+     )
+     return DiscoveryResult(
+         index=index,
+         report=report,
+         equivalence_audit=tuple(audit_rows),
++        unresolved=tuple(unresolved),
++        identity_audit=tuple(identities),
+     )
+diff --git a/pronresolve/equivalence.py b/pronresolve/equivalence.py
+index ff90759..25525eb 100644
+--- a/pronresolve/equivalence.py
++++ b/pronresolve/equivalence.py
+@@ -7,10 +7,10 @@ phonodist policy is constructed.
+
+ from __future__ import annotations
+
++from collections.abc import Callable, Iterable
+ from dataclasses import dataclass, field
++from itertools import combinations
+ from typing import Any, Literal, Protocol
+-from collections.abc import Callable
+-
+ from .normalization import normalize_ipa
+
+ StressPolicy = Literal["all", "primary"]
+@@ -113,3 +113,115 @@ class PhonodistEquivalence:
+                 return False
+             approved_operations += 1
+         return approved_operations > 0
++
++
++@dataclass(frozen=True, slots=True)
++class PronunciationClass:
++    """A deterministic set of pronunciations proven equivalent pairwise."""
++
++    pronunciations: tuple[str, ...]
++
++    def __post_init__(self) -> None:
++        values = tuple(sorted({normalize_ipa(value) for value in self.pronunciations} - {""}))
++        if not values:
++            raise ValueError("pronunciation class requires at least one value")
++        object.__setattr__(self, "pronunciations", values)
++
++
++@dataclass(frozen=True, slots=True)
++class EquivalencePair:
++    left: str
++    right: str
++    equivalent: bool | None
++    comparison: Any = None
++    error: str | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class EquivalencePartition:
++    classes: tuple[PronunciationClass, ...]
++    pairwise_audit: tuple[EquivalencePair, ...] = ()
++    unsafe: bool = False
++    reason: str | None = None
++
++
++def partition_pronunciations(
++    pronunciations: Iterable[str],
++    *,
++    policy: PronunciationEquivalence,
++) -> EquivalencePartition:
++    """Build deterministic complete-linkage classes; reject unsafe components."""
++    items = tuple(sorted({normalize_ipa(value) for value in pronunciations} - {""}))
++    adjacency = {item: {item} for item in items}
++    audit: list[EquivalencePair] = []
++    evaluate = getattr(policy, "evaluate", None)
++
++    for left, right in combinations(items, 2):
++        try:
++            if callable(evaluate):
++                equivalent, comparison = evaluate(left, right)
++                equivalent = bool(equivalent)
++            else:
++                comparison = None
++                equivalent = bool(policy.equivalent(left, right))
++        except Exception as exc:
++            audit.append(
++                EquivalencePair(
++                    left=left,
++                    right=right,
++                    equivalent=None,
++                    error=f"{type(exc).__name__}: {exc}",
++                )
++            )
++            continue
++        audit.append(
++            EquivalencePair(
++                left=left,
++                right=right,
++                equivalent=equivalent,
++                comparison=comparison,
++            )
++        )
++        if equivalent:
++            adjacency[left].add(right)
++            adjacency[right].add(left)
++
++    if any(pair.error is not None for pair in audit):
++        return EquivalencePartition(
++            classes=(),
++            pairwise_audit=tuple(audit),
++            unsafe=True,
++            reason="equivalence_error",
++        )
++
++    components: list[set[str]] = []
++    unvisited = set(items)
++    while unvisited:
++        pending = [min(unvisited)]
++        component: set[str] = set()
++        while pending:
++            current = pending.pop()
++            if current in component:
++                continue
++            component.add(current)
++            pending.extend(sorted(adjacency[current] - component, reverse=True))
++        unvisited.difference_update(component)
++        components.append(component)
++
++    for component in components:
++        for left, right in combinations(sorted(component), 2):
++            if right not in adjacency[left]:
++                return EquivalencePartition(
++                    classes=(),
++                    pairwise_audit=tuple(audit),
++                    unsafe=True,
++                    reason="non_transitive_equivalence_component",
++                )
++
++    classes = tuple(
++        sorted(
++            (PronunciationClass(tuple(component)) for component in components),
++            key=lambda item: item.pronunciations,
++        )
++    )
++    return EquivalencePartition(classes=classes, pairwise_audit=tuple(audit))
+diff --git a/pronresolve/models.py b/pronresolve/models.py
+index 9b6f89b..b3a6686 100644
+--- a/pronresolve/models.py
++++ b/pronresolve/models.py
+@@ -3,6 +3,8 @@
+ from __future__ import annotations
+
+ import math
++import re
++import unicodedata
+ from collections.abc import Mapping
+ from dataclasses import dataclass
+ from typing import Any
+@@ -15,7 +17,100 @@ from .normalization import (
+     tokens,
+ )
+
+-INDEX_SCHEMA_VERSION = 2
++INDEX_SCHEMA_VERSION = 3
++
++READING_ID_VERSION = 2
++_R2_ID_RE = re.compile(r"r2-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{24}")
++
++
++def is_reading_id_v2(value: object) -> bool:
++    """Return whether value is a well-formed semantic reading ID."""
++    return isinstance(value, str) and _R2_ID_RE.fullmatch(value) is not None
++
++
++def _opaque_identity_text(value: object, field: str) -> str:
++    if not isinstance(value, str):
++        raise ValueError(f"semantic anchor {field} values must be strings")
++    normalized = unicodedata.normalize("NFC", value).strip()
++    if not normalized:
++        raise ValueError(f"semantic anchor {field} values must be non-empty")
++    return normalized
++
++
++@dataclass(frozen=True, slots=True)
++class SemanticAnchor:
++    """Stable semantic identity for one pronunciation-resolution class."""
++
++    namespace: str
++    keys: tuple[str, ...]
++
++    def __post_init__(self) -> None:
++        namespace = _opaque_identity_text(self.namespace, "namespace")
++        if not isinstance(self.keys, tuple) or any(not isinstance(key, str) for key in self.keys):
++            raise ValueError("semantic anchor keys must be a tuple of strings")
++        keys = tuple(sorted({_opaque_identity_text(key, "key") for key in self.keys}))
++        if not keys:
++            raise ValueError("semantic anchor requires at least one key")
++        object.__setattr__(self, "namespace", namespace)
++        object.__setattr__(self, "keys", keys)
++
++    def to_dict(self) -> dict[str, object]:
++        return {"namespace": self.namespace, "keys": list(self.keys)}
++
++
++@dataclass(frozen=True, slots=True)
++class SemanticIdentity:
++    """Build-time provenance explaining the semantic identity of an r2 class."""
++
++    reading_id: str
++    word: str
++    pos: str
++    semantic_anchor: SemanticAnchor
++    sense_ids: tuple[str, ...]
++    source_ipas: tuple[str, ...]
++    anchor_ipa: str
++
++    def __post_init__(self) -> None:
++        if not is_reading_id_v2(self.reading_id):
++            raise ValueError("semantic identity reading_id must be a well-formed r2 ID")
++        if not isinstance(self.word, str) or not normalize_word(self.word):
++            raise ValueError("semantic identity word must be non-empty")
++        if not isinstance(self.pos, str) or not self.pos.strip():
++            raise ValueError("semantic identity POS must be non-empty")
++        if not isinstance(self.semantic_anchor, SemanticAnchor):
++            raise ValueError("semantic identity requires a SemanticAnchor")
++        if not isinstance(self.sense_ids, tuple):
++            raise ValueError("semantic identity sense_ids must be a tuple")
++        sense_ids = tuple(
++            sorted({_opaque_identity_text(item, "sense_id") for item in self.sense_ids})
++        )
++        if not isinstance(self.source_ipas, tuple) or any(
++            not isinstance(item, str) for item in self.source_ipas
++        ):
++            raise ValueError("semantic identity source_ipas must be a tuple of strings")
++        source_ipas = tuple(sorted({normalize_ipa(item) for item in self.source_ipas} - {""}))
++        if not source_ipas or any(not _is_pronunciation_candidate(item) for item in source_ipas):
++            raise ValueError("semantic identity requires valid source IPA values")
++        anchor_ipa = normalize_ipa(self.anchor_ipa) if isinstance(self.anchor_ipa, str) else ""
++        if anchor_ipa != source_ipas[0]:
++            raise ValueError("semantic identity anchor_ipa must be the first sorted source IPA")
++        object.__setattr__(self, "reading_id", self.reading_id.strip())
++        object.__setattr__(self, "word", normalize_word(self.word))
++        object.__setattr__(self, "pos", normalize_pos(self.pos))
++        object.__setattr__(self, "sense_ids", sense_ids)
++        object.__setattr__(self, "source_ipas", source_ipas)
++        object.__setattr__(self, "anchor_ipa", anchor_ipa)
++
++    def to_dict(self) -> dict[str, object]:
++        return {
++            "id": self.reading_id,
++            "word": self.word,
++            "pos": self.pos,
++            "semantic_anchor": self.semantic_anchor.to_dict(),
++            "sense_ids": list(self.sense_ids),
++            "source_ipas": list(self.source_ipas),
++            "anchor_ipa": self.anchor_ipa,
++        }
+
+
+ def _required_string(value: Mapping[str, Any], field: str, path: str) -> str:
+@@ -78,17 +173,45 @@ class Cue:
+         object.__setattr__(self, "weight", weight)
+
+
+-@dataclass(frozen=True, slots=True)
++@dataclass(frozen=True, slots=True, init=False)
+ class ReadingProfile:
+-    """Lean runtime profile for one pronunciation and its compiled lexical cues."""
++    """Lean runtime profile for one semantic resolution class."""
+
+     word: str
+     pos: str
+     reading_id: str
+-    ipa: str
++    anchor_ipa: str
+     sense_ids: tuple[str, ...] = ()
+     cues: tuple[Cue, ...] = ()
+
++    def __init__(
++        self,
++        word: str,
++        pos: str,
++        reading_id: str,
++        anchor_ipa: str | None = None,
++        sense_ids: tuple[str, ...] = (),
++        cues: tuple[Cue, ...] = (),
++        *,
++        ipa: str | None = None,
++    ) -> None:
++        if anchor_ipa is None:
++            anchor_ipa = ipa
++        elif ipa is not None and ipa != anchor_ipa:
++            raise ValueError("ipa and anchor_ipa compatibility arguments disagree")
++        object.__setattr__(self, "word", word)
++        object.__setattr__(self, "pos", pos)
++        object.__setattr__(self, "reading_id", reading_id)
++        object.__setattr__(self, "anchor_ipa", anchor_ipa)
++        object.__setattr__(self, "sense_ids", sense_ids)
++        object.__setattr__(self, "cues", cues)
++        self.__post_init__()
++
++    @property
++    def ipa(self) -> str:
++        """Deprecated compatibility alias for the diagnostic anchor IPA."""
++        return self.anchor_ipa
++
+     def __post_init__(self) -> None:
+         if not isinstance(self.word, str) or not normalize_word(self.word):
+             raise ValueError("profile.word must be a non-empty string")
+@@ -96,13 +219,13 @@ class ReadingProfile:
+             raise ValueError("profile.pos must be a non-empty string")
+         if not isinstance(self.reading_id, str) or not self.reading_id.strip():
+             raise ValueError("profile.reading_id must be a non-empty string")
+-        if not isinstance(self.ipa, str):
+-            raise ValueError("profile.ipa must be a non-empty scalar string")
+-        ipa = normalize_ipa(self.ipa)
+-        if not ipa:
+-            raise ValueError("profile.ipa must be a non-empty scalar string")
+-        if not _is_pronunciation_candidate(ipa):
+-            raise ValueError("profile.ipa must contain a segment-like Unicode letter")
++        if not isinstance(self.anchor_ipa, str):
++            raise ValueError("profile.anchor_ipa must be a non-empty scalar string")
++        anchor_ipa = normalize_ipa(self.anchor_ipa)
++        if not anchor_ipa:
++            raise ValueError("profile.anchor_ipa must be a non-empty scalar string")
++        if not _is_pronunciation_candidate(anchor_ipa):
++            raise ValueError("profile.anchor_ipa must contain a segment-like Unicode letter")
+         if not isinstance(self.sense_ids, tuple) or any(
+             not isinstance(item, str) for item in self.sense_ids
+         ):
+@@ -115,7 +238,9 @@ class ReadingProfile:
+         object.__setattr__(self, "word", normalize_word(self.word))
+         object.__setattr__(self, "pos", normalize_pos(self.pos))
+         object.__setattr__(self, "reading_id", self.reading_id.strip())
+-        object.__setattr__(self, "ipa", ipa)
++        object.__setattr__(self, "anchor_ipa", anchor_ipa)
++        if self.reading_id.startswith("r2-") and not is_reading_id_v2(self.reading_id):
++            raise ValueError("profile.reading_id must be a well-formed r2 ID")
+         object.__setattr__(self, "sense_ids", tuple(sorted(set(self.sense_ids))))
+         object.__setattr__(self, "cues", tuple(sorted(self.cues, key=lambda cue: cue.token)))
+
+@@ -125,11 +250,19 @@ class ReadingProfile:
+             grouped.setdefault(_weight_key(cue.weight), []).append(cue.token)
+         return {
+             "id": self.reading_id,
+-            "ipa": self.ipa,
+-            "sense_ids": list(self.sense_ids),
++            "anchor_ipa": self.anchor_ipa,
+             "cues": {weight: sorted(values) for weight, values in sorted(grouped.items())},
+         }
+
++    def to_v2_dict(self) -> dict[str, Any]:
++        grouped = self.to_dict()["cues"]
++        return {
++            "id": self.reading_id,
++            "ipa": self.anchor_ipa,
++            "sense_ids": list(self.sense_ids),
++            "cues": grouped,
++        }
++
+
+ @dataclass(frozen=True, slots=True)
+ class AmbiguityIndex:
+@@ -137,13 +270,11 @@ class AmbiguityIndex:
+     locale: str | None
+     profiles: tuple[ReadingProfile, ...]
+     schema_version: int = INDEX_SCHEMA_VERSION
++    rules_id: str | None = None
+
+     def __post_init__(self) -> None:
+-        if self.schema_version != INDEX_SCHEMA_VERSION:
+-            raise ValueError(
+-                f"unsupported ambiguity index schema {self.schema_version}; "
+-                f"supported schema is {INDEX_SCHEMA_VERSION}"
+-            )
++        if self.schema_version not in (2, INDEX_SCHEMA_VERSION):
++            raise ValueError(f"unsupported ambiguity index schema {self.schema_version}")
+         if not isinstance(self.language, str) or not normalize_word(self.language):
+             raise ValueError("index.language must be a non-empty string")
+         if self.locale is not None and (
+@@ -154,6 +285,19 @@ class AmbiguityIndex:
+             not isinstance(profile, ReadingProfile) for profile in self.profiles
+         ):
+             raise ValueError("index.profiles must be a tuple of ReadingProfile values")
++        if self.schema_version == INDEX_SCHEMA_VERSION:
++            if any(not is_reading_id_v2(profile.reading_id) for profile in self.profiles):
++                raise ValueError("schema-v3 profiles must use well-formed r2 reading IDs")
++            rules_id = self.rules_id
++            if rules_id is None:
++                rules_id = normalize_word(self.locale or self.language)
++            if not isinstance(rules_id, str) or not rules_id.strip():
++                raise ValueError("schema-v3 rules_id must be a non-empty string")
++            object.__setattr__(self, "rules_id", rules_id.strip())
++        elif self.rules_id is not None and (
++            not isinstance(self.rules_id, str) or not self.rules_id.strip()
++        ):
++            raise ValueError("index.rules_id must be a non-empty string or null")
+         object.__setattr__(self, "language", normalize_word(self.language))
+         if self.locale is not None:
+             object.__setattr__(self, "locale", self.locale.strip())
+@@ -166,7 +310,7 @@ class AmbiguityIndex:
+                     key=lambda profile: (
+                         profile.word,
+                         profile.pos,
+-                        profile.ipa,
++                        profile.anchor_ipa,
+                         profile.reading_id,
+                     ),
+                 )
+@@ -177,9 +321,11 @@ class AmbiguityIndex:
+         entries: dict[str, dict[str, list[dict[str, Any]]]] = {}
+         for profile in self.profiles:
+             grouped_profiles = entries.setdefault(profile.word, {}).setdefault(profile.pos, [])
+-            grouped_profiles.append(profile.to_dict())
+-        return {
+-            "schema_version": INDEX_SCHEMA_VERSION,
++            grouped_profiles.append(
++                profile.to_v2_dict() if self.schema_version == 2 else profile.to_dict()
++            )
++        result: dict[str, Any] = {
++            "schema_version": self.schema_version,
+             "language": self.language,
+             "locale": self.locale,
+             "entries": {
+@@ -187,6 +333,10 @@ class AmbiguityIndex:
+                 for word, groups in sorted(entries.items())
+             },
+         }
++        if self.schema_version == INDEX_SCHEMA_VERSION:
++            result["id_version"] = READING_ID_VERSION
++            result["rules_id"] = self.rules_id
++        return result
+
+     @classmethod
+     def from_dict(cls, value: Mapping[str, Any]) -> AmbiguityIndex:
+@@ -195,8 +345,18 @@ class AmbiguityIndex:
+         version = value.get("schema_version")
+         if isinstance(version, bool) or not isinstance(version, int):
+             raise ValueError("schema_version must be an integer")
+-        if version != INDEX_SCHEMA_VERSION:
++        if version not in (2, INDEX_SCHEMA_VERSION):
+             raise ValueError(f"unsupported ambiguity index schema {version}")
++        rules_id = None
++        if version == INDEX_SCHEMA_VERSION:
++            id_version = value.get("id_version")
++            if (
++                isinstance(id_version, bool)
++                or not isinstance(id_version, int)
++                or id_version != READING_ID_VERSION
++            ):
++                raise ValueError("schema-v3 id_version must be 2")
++            rules_id = _required_string(value, "rules_id", "index")
+         language = _required_string(value, "language", "index")
+         if "locale" not in value:
+             raise ValueError("index.locale is required")
+@@ -210,6 +370,7 @@ class AmbiguityIndex:
+         profiles: list[ReadingProfile] = []
+         seen_ids: set[str] = set()
+         seen_words: set[str] = set()
++        ipa_field = "ipa" if version == 2 else "anchor_ipa"
+         for raw_word, raw_groups in entries.items():
+             if not isinstance(raw_word, str) or not normalize_word(raw_word):
+                 raise ValueError("index.entries contains an empty or invalid word key")
+@@ -241,7 +402,9 @@ class AmbiguityIndex:
+                     if reading_id in seen_ids:
+                         raise ValueError(f"{path}.id duplicates reading ID {reading_id!r}")
+                     seen_ids.add(reading_id)
+-                    ipa = _required_string(raw_profile, "ipa", path)
++                    if version == INDEX_SCHEMA_VERSION and not is_reading_id_v2(reading_id):
++                        raise ValueError(f"{path}.id must be a well-formed r2 reading ID")
++                    anchor_ipa = _required_string(raw_profile, ipa_field, path)
+                     sense_ids = _string_array(raw_profile, "sense_ids", path)
+                     raw_cues = raw_profile.get("cues")
+                     if not isinstance(raw_cues, Mapping):
+@@ -278,7 +441,7 @@ class AmbiguityIndex:
+                             word=word,
+                             pos=pos,
+                             reading_id=reading_id,
+-                            ipa=ipa,
++                            anchor_ipa=anchor_ipa,
+                             sense_ids=sense_ids,
+                             cues=tuple(cue_values),
+                         )
+@@ -288,9 +451,63 @@ class AmbiguityIndex:
+             locale=locale,
+             profiles=tuple(profiles),
+             schema_version=version,
++            rules_id=rules_id,
+         )
+
+
++@dataclass(frozen=True, slots=True)
++class UnresolvedAmbiguity:
++    """A detected word/POS pronunciation ambiguity that was not safely published."""
++
++    word: str
++    pos: str
++    reason: str
++    pronunciations: tuple[str, ...] = ()
++    sense_ids: tuple[str, ...] = ()
++    details: Mapping[str, Any] | None = None
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.word, str) or not normalize_word(self.word):
++            raise ValueError("unresolved ambiguity word must be non-empty")
++        if not isinstance(self.pos, str) or not self.pos.strip():
++            raise ValueError("unresolved ambiguity POS must be non-empty")
++        if not isinstance(self.reason, str) or not self.reason.strip():
++            raise ValueError("unresolved ambiguity reason must be non-empty")
++        if not isinstance(self.pronunciations, tuple) or any(
++            not isinstance(value, str) for value in self.pronunciations
++        ):
++            raise ValueError("unresolved ambiguity pronunciations must be a tuple of strings")
++        if not isinstance(self.sense_ids, tuple) or any(
++            not isinstance(value, str) for value in self.sense_ids
++        ):
++            raise ValueError("unresolved ambiguity sense_ids must be a tuple of strings")
++        if self.details is not None and not isinstance(self.details, Mapping):
++            raise ValueError("unresolved ambiguity details must be a mapping or null")
++        object.__setattr__(self, "word", normalize_word(self.word))
++        object.__setattr__(self, "pos", normalize_pos(self.pos))
++        object.__setattr__(self, "reason", self.reason.strip())
++        object.__setattr__(
++            self,
++            "pronunciations",
++            tuple(sorted({normalize_ipa(value) for value in self.pronunciations} - {""})),
++        )
++        object.__setattr__(
++            self,
++            "sense_ids",
++            tuple(sorted({_opaque_identity_text(value, "sense_id") for value in self.sense_ids})),
++        )
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "word": self.word,
++            "pos": self.pos,
++            "reason": self.reason,
++            "pronunciations": list(self.pronunciations),
++            "sense_ids": list(self.sense_ids),
++            "details": dict(self.details) if self.details is not None else None,
++        }
++
++
+ @dataclass(frozen=True, slots=True)
+ class DiscoveryReport:
+     entries_scanned: int
+@@ -302,27 +519,55 @@ class DiscoveryReport:
+     entries_without_pronunciation: int
+     entries_without_pos: int = 0
+     unlinked_keys: tuple[str, ...] = ()
+-
+     invalid_pronunciation_values: int = 0
+     equivalent_pronunciation_keys: int = 0
+     equivalence_comparisons: int = 0
+     equivalence_errors: int = 0
++    equivalence_unsafe_keys: int = 0
++    missing_semantic_anchor_keys: int = 0
++    semantic_overlap_keys: int = 0
++    non_discriminative_keys: int = 0
++    runtime_profile_count: int = 0
++    runtime_cue_count: int = 0
++    unresolved_reason_counts: tuple[tuple[str, int], ...] = ()
++
++    @property
++    def raw_ambiguous_keys(self) -> int:
++        return self.ambiguous_keys
++
++    @property
++    def word_pos_keys_scanned(self) -> int:
++        return self.keys_scanned
++
++    @property
++    def equivalent_only_keys(self) -> int:
++        return self.equivalent_pronunciation_keys
+
+     def as_dict(self) -> dict[str, Any]:
+         return {
+             "entries_scanned": self.entries_scanned,
++            "word_pos_keys_scanned": self.keys_scanned,
++            "raw_ambiguous_keys": self.ambiguous_keys,
+             "keys_scanned": self.keys_scanned,
+             "ambiguous_keys": self.ambiguous_keys,
+             "resolvable_keys": self.resolvable_keys,
+             "unlinked_ambiguity_keys": self.unlinked_ambiguity_keys,
++            "unlinked_keys": list(self.unlinked_keys),
+             "non_ambiguous_keys": self.non_ambiguous_keys,
+             "entries_without_pronunciation": self.entries_without_pronunciation,
+             "entries_without_pos": self.entries_without_pos,
+-            "unlinked_keys": list(self.unlinked_keys),
+             "invalid_pronunciation_values": self.invalid_pronunciation_values,
+             "equivalent_pronunciation_keys": self.equivalent_pronunciation_keys,
++            "equivalent_only_keys": self.equivalent_pronunciation_keys,
+             "equivalence_comparisons": self.equivalence_comparisons,
+             "equivalence_errors": self.equivalence_errors,
++            "equivalence_unsafe_keys": self.equivalence_unsafe_keys,
++            "missing_semantic_anchor_keys": self.missing_semantic_anchor_keys,
++            "semantic_overlap_keys": self.semantic_overlap_keys,
++            "non_discriminative_keys": self.non_discriminative_keys,
++            "runtime_profile_count": self.runtime_profile_count,
++            "runtime_cue_count": self.runtime_cue_count,
++            "unresolved_reason_counts": dict(self.unresolved_reason_counts),
+         }
+
+
+@@ -331,6 +576,8 @@ class DiscoveryResult:
+     index: AmbiguityIndex
+     report: DiscoveryReport
+     equivalence_audit: tuple[dict[str, Any], ...] = ()
++    unresolved: tuple[UnresolvedAmbiguity, ...] = ()
++    identity_audit: tuple[SemanticIdentity, ...] = ()
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -345,13 +592,18 @@ class Resolution:
+     word: str
+     pos: str
+     reading_id: str
+-    ipa: str
++    anchor_ipa: str
+     sense_ids: tuple[str, ...]
+     score: float
+     margin: float
+     evidence_terms: tuple[str, ...]
+     candidates: tuple[CandidateScore, ...]
+
++    @property
++    def ipa(self) -> str:
++        """Deprecated compatibility alias for the diagnostic anchor IPA."""
++        return self.anchor_ipa
++
+     @property
+     def selector(self) -> str:
+         return f"READING:{self.reading_id}"
+diff --git a/pronresolve/resolver.py b/pronresolve/resolver.py
+index 7ed836e..2d8ab26 100644
+--- a/pronresolve/resolver.py
++++ b/pronresolve/resolver.py
+@@ -145,7 +145,7 @@ class Resolver:
+             word=selected.word,
+             pos=selected.pos,
+             reading_id=selected.reading_id,
+-            ipa=selected.ipa,
++            anchor_ipa=selected.anchor_ipa,
+             sense_ids=selected.sense_ids,
+             score=best.score,
+             margin=margin,
+diff --git a/pronresolve/storage.py b/pronresolve/storage.py
+index 9e9f6ee..01f7fa3 100644
+--- a/pronresolve/storage.py
++++ b/pronresolve/storage.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+
+ import json
++from dataclasses import replace
+ from collections.abc import Mapping
+ from pathlib import Path
+ from typing import Any
+@@ -33,17 +34,34 @@ def _string_array(
+
+
+ def encode_v2(index: AmbiguityIndex) -> dict[str, Any]:
+-    """Encode an internal index using the compact grouped schema-v2 wire format."""
++    """Explicitly encode a grouped schema-v2 compatibility payload."""
+     if not isinstance(index, AmbiguityIndex):
+         raise TypeError("encode_v2 expects an AmbiguityIndex")
+-    payload = index.to_dict()
+-    # Reuse the strict decoder to enforce emitted-group and ID/cue invariants.
++    payload = replace(index, schema_version=2, rules_id=None).to_dict()
+     decode_v2(payload)
+     return payload
+
+
+ def decode_v2(value: Mapping[str, Any]) -> AmbiguityIndex:
+-    """Validate and decode a schema-v2 payload into canonical runtime models."""
++    """Validate and decode schema v2 without changing reading IDs."""
++    if not isinstance(value, Mapping) or value.get("schema_version") != 2:
++        raise ValueError("decode_v2 expects a schema-v2 object")
++    return AmbiguityIndex.from_dict(value)
++
++
++def encode_v3(index: AmbiguityIndex) -> dict[str, Any]:
++    """Encode the canonical schema-v3 rules format; legacy IDs are never upgraded."""
++    if not isinstance(index, AmbiguityIndex):
++        raise TypeError("encode_v3 expects an AmbiguityIndex")
++    payload = replace(index, schema_version=3).to_dict()
++    decode_v3(payload)
++    return payload
++
++
++def decode_v3(value: Mapping[str, Any]) -> AmbiguityIndex:
++    """Validate and decode schema v3 with mandatory r2 identity metadata."""
++    if not isinstance(value, Mapping) or value.get("schema_version") != 3:
++        raise ValueError("decode_v3 expects a schema-v3 object")
+     return AmbiguityIndex.from_dict(value)
+
+
+@@ -113,14 +131,30 @@ def decode_v1(value: Mapping[str, Any]) -> AmbiguityIndex:
+             )
+         )
+
+-    return AmbiguityIndex(language=language, locale=locale, profiles=tuple(profiles))
++    return AmbiguityIndex(
++        language=language,
++        locale=locale,
++        profiles=tuple(profiles),
++        schema_version=2,
++    )
+
+
+-def save_index(index: AmbiguityIndex, path: str | Path) -> Path:
++def save_index(
++    index: AmbiguityIndex,
++    path: str | Path,
++    *,
++    schema_version: int | None = None,
++) -> Path:
+     destination = Path(path)
+     destination.parent.mkdir(parents=True, exist_ok=True)
+     temporary = destination.with_name(destination.name + ".tmp")
+-    payload = encode_v2(index)
++    output_version = index.schema_version if schema_version is None else schema_version
++    if output_version == 2:
++        payload = encode_v2(index)
++    elif output_version == INDEX_SCHEMA_VERSION:
++        payload = encode_v3(index)
++    else:
++        raise ValueError(f"unsupported output schema version {output_version}")
+     temporary.write_text(
+         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+         encoding="utf-8",
+@@ -139,6 +173,8 @@ def load_index(path: str | Path) -> AmbiguityIndex:
+         raise ValueError("schema_version must be an integer")
+     if version == 1:
+         return decode_v1(value)
+-    if version == INDEX_SCHEMA_VERSION:
++    if version == 2:
+         return decode_v2(value)
++    if version == INDEX_SCHEMA_VERSION:
++        return decode_v3(value)
+     raise ValueError(f"unsupported ambiguity index schema {version}")
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index a5ac117..b853768 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -34,21 +34,43 @@ def test_build_inspect_validate_cli(tmp_path, capsys):
+         encoding="utf-8",
+     )
+     index_path = tmp_path / "index.json"
++    identity_audit_path = tmp_path / "identity-audit.json"
+     status, output = _run_cli(
+         capsys,
+-        ["build", "--input-jsonl", str(source), "--output", str(index_path), "--language", "en"],
++        [
++            "build",
++            "--input-jsonl",
++            str(source),
++            "--output",
++            str(index_path),
++            "--language",
++            "en",
++            "--rules-id",
++            "en-us",
++            "--identity-audit-output",
++            str(identity_audit_path),
++        ],
+     )
+     assert status == 0
+-    assert json.loads(output.out)["schema_version"] == 2
++    assert json.loads(output.out)["schema_version"] == 3
+     assert json.loads(output.out)["resolvable_keys"] == 1
+     assert index_path.exists()
+-    assert json.loads(index_path.read_text(encoding="utf-8"))["schema_version"] == 2
++    assert json.loads(index_path.read_text(encoding="utf-8"))["schema_version"] == 3
++    assert json.loads(index_path.read_text(encoding="utf-8"))["id_version"] == 2
++    assert json.loads(index_path.read_text(encoding="utf-8"))["rules_id"] == "en-us"
++    identity_records = json.loads(identity_audit_path.read_text(encoding="utf-8"))
++    assert len(identity_records) == 2
++    assert all(record["id"].startswith("r2-en-") for record in identity_records)
++    assert "semantic_anchor" in identity_records[0]
+     report = tmp_path / "index.json.report.json"
+     assert json.loads(report.read_text(encoding="utf-8"))["entries_scanned"] == 2
+
+     assert main(["inspect", str(index_path)]) == 0
+     summary = json.loads(capsys.readouterr().out)
+     assert summary["valid"] is True
++    assert summary["runtime_schema_version"] == 3
++    assert summary["id_version"] == 2
++    assert summary["rules_id"] == "en-us"
+     assert summary["ambiguous_word_count"] == 1
+     assert summary["word_pos_group_count"] == 1
+     assert summary["profile_count"] == 2
+@@ -61,11 +83,12 @@ def test_build_inspect_validate_cli(tmp_path, capsys):
+     assert len(details["readings"]) == 2
+     assert {reading["pos"] for reading in details["readings"]} == {"NOUN"}
+     assert {reading["ipa"] for reading in details["readings"]} == {"liːd", "lɛd"}
+-    assert all(reading["sense_ids"] for reading in details["readings"])
++    assert all(not reading["sense_ids"] for reading in details["readings"])
++    assert {reading["anchor_ipa"] for reading in details["readings"]} == {"liːd", "lɛd"}
+     assert all(reading["weighted_cues"] for reading in details["readings"])
+
+     assert main(["validate", str(index_path)]) == 0
+-    assert json.loads(capsys.readouterr().out)["schema_version"] == 2
++    assert json.loads(capsys.readouterr().out)["schema_version"] == 3
+
+
+ def test_validate_and_inspect_accept_v1_and_show_policy_b_runtime(tmp_path, capsys):
+@@ -117,7 +140,7 @@ def test_validate_and_inspect_accept_v1_and_show_policy_b_runtime(tmp_path, caps
+     assert "exampleonlycue" not in cues
+
+
+-def test_policy_b_v2_serialization_is_at_most_half_equivalent_v1_pretty_fixture(tmp_path):
++def test_policy_b_v3_serialization_is_at_most_half_equivalent_v1_pretty_fixture(tmp_path):
+     examples = [f"Example {number}: " + "incidentalword " * 10 for number in range(20)]
+     rows = [_entry("liːd", "metal"), _entry("lɛd", "guide")]
+     for row in rows:
+@@ -347,3 +370,64 @@ def test_audit_output_requires_phonodist_mode(tmp_path, capsys):
+
+     assert status == 2
+     assert "requires --pronunciation-equivalence phonodist" in output.err
++
++
++def test_cli_build_loads_reviewed_curated_anchor_overlay(tmp_path, capsys):
++    entries = [
++        {
++            "word": "wug",
++            "pos": "NOUN",
++            "source_id": "fish-row",
++            "pronunciations": [{"ipa": "wʌg"}],
++            "senses": [{"glosses": ["freshwater fish"]}],
++        },
++        {
++            "word": "wug",
++            "pos": "NOUN",
++            "source_id": "music-row",
++            "pronunciations": [{"ipa": "wuːg"}],
++            "senses": [{"glosses": ["musical instrument"]}],
++        },
++    ]
++    overlay = [
++        {
++            "word": "wug",
++            "pos": "NOUN",
++            "source_id": "fish-row",
++            "semantic_anchor": {"namespace": "fixture:en", "keys": ["fish"]},
++        },
++        {
++            "word": "wug",
++            "pos": "NOUN",
++            "source_id": "music-row",
++            "semantic_anchor": {"namespace": "fixture:en", "keys": ["music"]},
++        },
++    ]
++    source = tmp_path / "entries.jsonl"
++    source.write_text("\n".join(json.dumps(row) for row in entries) + "\n", encoding="utf-8")
++    overlay_path = tmp_path / "semantic-anchors.json"
++    overlay_path.write_text(json.dumps(overlay), encoding="utf-8")
++    index_path = tmp_path / "rules.json"
++    identity_audit = tmp_path / "identity-audit.json"
++
++    status, output = _run_cli(
++        capsys,
++        [
++            "build",
++            "--input-jsonl",
++            str(source),
++            "--output",
++            str(index_path),
++            "--language",
++            "en",
++            "--curated-anchors",
++            str(overlay_path),
++            "--identity-audit-output",
++            str(identity_audit),
++        ],
++    )
++
++    assert status == 0
++    assert json.loads(output.out)["resolvable_keys"] == 1
++    records = json.loads(identity_audit.read_text(encoding="utf-8"))
++    assert {record["semantic_anchor"]["keys"][0] for record in records} == {"fish", "music"}
+diff --git a/tests/test_compilation.py b/tests/test_compilation.py
+index b0e0e63..bf169fa 100644
+--- a/tests/test_compilation.py
++++ b/tests/test_compilation.py
+@@ -1,6 +1,10 @@
+ import pytest
+
+-from pronresolve.compile import EVIDENCE_WEIGHTS, compile_cues
++from pronresolve.compile import (
++    EVIDENCE_WEIGHTS,
++    compile_contrastive_cues,
++    compile_cues,
++)
+ from pronresolve.models import Cue, ReadingProfile
+
+
+@@ -89,9 +93,39 @@ def test_runtime_profile_is_lean_scalar_and_has_unique_ordered_cues():
+     assert profile.ipa == "ɹɛd"
+     assert profile.sense_ids == ("sense-a", "sense-b")
+     assert [cue.token for cue in profile.cues] == ["alpha", "zebra"]
+-    assert set(profile.to_dict()) == {"id", "ipa", "sense_ids", "cues"}
++    assert set(profile.to_dict()) == {"id", "anchor_ipa", "cues"}
+     with pytest.raises(ValueError, match="duplicate tokens"):
+         ReadingProfile("read", "VERB", "r2", "ɹɛd", cues=(Cue("word", 1), Cue("WORD", 3)))
+
+     with pytest.raises(ValueError, match="not defined by the Policy B"):
+         Cue("unknown", 4.0)
++
++
++def test_contrastive_compiler_removes_cues_shared_by_every_candidate():
++    result = compile_contrastive_cues(
++        [
++            (Cue("common", 3.0), Cue("fish", 3.0)),
++            (Cue("common", 3.0), Cue("music", 3.0)),
++        ]
++    )
++
++    assert result.selectable
++    assert result.reason is None
++    assert result.shared_tokens == ("common",)
++    assert tuple(tuple(cue.token for cue in cues) for cues in result.cue_sets) == (
++        ("fish",),
++        ("music",),
++    )
++
++
++def test_contrastive_compiler_rejects_identical_maps_and_empty_candidate():
++    same_maps = compile_contrastive_cues([(Cue("common", 3.0),), (Cue("common", 3.0),)])
++    assert not same_maps.selectable
++    assert same_maps.reason == "non_discriminative_rules"
++    assert same_maps.cue_sets == ((), ())
++
++    missing_cues = compile_contrastive_cues(
++        [(Cue("common", 3.0), Cue("fish", 3.0)), (Cue("common", 3.0),)]
++    )
++    assert not missing_cues.selectable
++    assert missing_cues.reason == "insufficient_contrastive_evidence"
+diff --git a/tests/test_discovery.py b/tests/test_discovery.py
+index 0e2f59a..6896fdb 100644
+--- a/tests/test_discovery.py
++++ b/tests/test_discovery.py
+@@ -54,7 +54,7 @@ def test_discovery_compiles_cues_without_examples_or_raw_runtime_evidence():
+     assert all("quizzicalexamplecue" not in {cue.token for cue in p.cues} for p in profiles)
+     assert all(profile.sense_ids for profile in profiles)
+     for candidates in result.index.to_dict()["entries"]["lead"]["VERB"]:
+-        assert set(candidates) == {"id", "ipa", "sense_ids", "cues"}
++        assert set(candidates) == {"id", "anchor_ipa", "cues"}
+
+
+ def test_same_entry_with_two_ipa_is_reported_but_not_guessed():
+@@ -104,9 +104,12 @@ def test_complete_index_is_deterministic_across_evidence_input_order(tmp_path):
+         entry("wug", "noun", "wʌg", "alpha gloss", "sense-a"),
+         entry("wug", "noun", "wuːg", "bend", "sense-b"),
+     ]
+-    one_index = discover_ambiguities(rows, language="en").index
+-    two_index = discover_ambiguities(reversed(rows), language="en").index
++    one = discover_ambiguities(rows, language="en")
++    two = discover_ambiguities(reversed(rows), language="en")
++    one_index = one.index
++    two_index = two.index
+     assert one_index.to_dict() == two_index.to_dict()
++    assert one.identity_audit == two.identity_audit
+     one_path = save_index(one_index, tmp_path / "one.json")
+     two_path = save_index(two_index, tmp_path / "two.json")
+     assert one_path.read_bytes() == two_path.read_bytes()
+@@ -213,9 +216,10 @@ def test_equivalence_uses_complete_linkage_not_transitive_chaining():
+         pronunciation_equivalence=ChainEquivalence(),
+     )
+
+-    assert {profile.ipa for profile in result.index.profiles} == {"a", "b", "c"}
++    assert result.index.profiles == ()
+     assert result.report.equivalence_comparisons == 3
+-    assert result.report.equivalent_pronunciation_keys == 0
++    assert result.report.equivalence_unsafe_keys == 1
++    assert result.unresolved[0].reason == "non_transitive_equivalence_component"
+
+
+ def test_equivalence_errors_fail_closed_and_are_counted():
+@@ -232,10 +236,11 @@ def test_equivalence_errors_fail_closed_and_are_counted():
+         pronunciation_equivalence=BrokenEquivalence(),
+     )
+
+-    assert len(result.index.profiles) == 2
++    assert result.index.profiles == ()
+     assert result.report.equivalence_comparisons == 1
+     assert result.report.equivalence_errors == 1
+-    assert result.report.equivalent_pronunciation_keys == 0
++    assert result.report.equivalence_unsafe_keys == 1
++    assert result.unresolved[0].reason == "equivalence_error"
+
+
+ def test_phonodist_unsupported_comparison_is_audited_and_fails_closed():
+@@ -261,7 +266,173 @@ def test_phonodist_unsupported_comparison_is_audited_and_fails_closed():
+         include_equivalence_audit=True,
+     )
+
+-    assert len(forward.index.profiles) == 2
++    assert forward.index.profiles == ()
+     assert forward.report.equivalence_errors == 1
+     assert forward.equivalence_audit == reversed_result.equivalence_audit
+     assert "error" in forward.equivalence_audit[0]
++    assert forward.unresolved[0].reason == "equivalence_error"
++
++
++def test_safe_partial_equivalence_merges_only_pairwise_clique():
++    class PartialEquivalence:
++        def equivalent(self, left, right):
++            return frozenset((left, right)) == frozenset(("a", "b"))
++
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "a", "first reading", "sense-a"),
++            entry("wug", "noun", "b", "alternate form", "sense-b"),
++            entry("wug", "noun", "c", "third reading", "sense-c"),
++        ],
++        language="en",
++        pronunciation_equivalence=PartialEquivalence(),
++    )
++
++    assert len(result.index.profiles) == 2
++    merged = next(
++        identity for identity in result.identity_audit if identity.source_ipas == ("a", "b")
++    )
++    assert merged.sense_ids == ("sense-a", "sense-b")
++    assert merged.semantic_anchor.keys == ("sense-a", "sense-b")
++    assert all(profile.reading_id.startswith("r2-en-") for profile in result.index.profiles)
++
++
++def test_bass_noun_is_the_same_pos_resolution_regression():
++    fish = entry("bass", "NOUN", "bæs", "a freshwater fish", "bass-fish")
++    music = entry("bass", "NOUN", "beɪs", "low musical range", "bass-music")
++    first = discover_ambiguities([fish, music], language="en", locale="en-US")
++    changed_fish = entry("bass", "NOUN", "bæːs", "a freshwater fish", "bass-fish")
++    second = discover_ambiguities([changed_fish, music], language="en", locale="en-GB")
++
++    assert len(first.index.profiles) == 2
++    assert {profile.reading_id for profile in first.index.profiles} == {
++        profile.reading_id for profile in second.index.profiles
++    }
++    assert all(profile.reading_id.startswith("r2-en-") for profile in first.index.profiles)
++
++
++def test_pos_separated_single_readings_do_not_create_resolver_profiles():
++    result = discover_ambiguities(
++        [
++            entry("possplit", "NOUN", "a", "noun reading", "sense-noun"),
++            entry("possplit", "VERB", "b", "verb reading", "sense-verb"),
++        ],
++        language="en",
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.raw_ambiguous_keys == 0
++    assert result.report.resolvable_keys == 0
++    assert result.report.word_pos_keys_scanned == 2
++
++
++def test_missing_semantic_anchor_is_structured_unresolved():
++    result = discover_ambiguities(
++        [
++            {"word": "wug", "pos": "noun", "pronunciations": [{"ipa": "a"}], "senses": []},
++            {"word": "wug", "pos": "noun", "pronunciations": [{"ipa": "b"}], "senses": []},
++        ],
++        language="en",
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.missing_semantic_anchor_keys == 1
++    assert result.unresolved[0].reason == "missing_semantic_anchor"
++    assert result.report.as_dict()["unresolved_reason_counts"] == {"missing_semantic_anchor": 1}
++
++
++def test_curated_semantic_anchor_overlay_supports_entries_without_sense_ids():
++    rows = [
++        {
++            "word": "bass",
++            "pos": "NOUN",
++            "source_id": "fish-row",
++            "pronunciations": [{"ipa": "bæs"}],
++            "senses": [{"glosses": ["a fish"]}],
++        },
++        {
++            "word": "bass",
++            "pos": "NOUN",
++            "source_id": "music-row",
++            "pronunciations": [{"ipa": "beɪs"}],
++            "senses": [{"glosses": ["a low musical range"]}],
++        },
++    ]
++    overlay = [
++        {
++            "word": "bass",
++            "pos": "noun",
++            "source_id": "fish-row",
++            "semantic_anchor": {"namespace": "pronresolve:curated:en", "keys": ["bass-fish"]},
++        },
++        {
++            "word": "bass",
++            "pos": "noun",
++            "source_id": "music-row",
++            "semantic_anchor": {"namespace": "pronresolve:curated:en", "keys": ["bass-music"]},
++        },
++    ]
++
++    result = discover_ambiguities(rows, language="en", curated_anchors=overlay)
++
++    assert len(result.index.profiles) == 2
++    assert {identity.semantic_anchor.namespace for identity in result.identity_audit} == {
++        "pronresolve:curated:en"
++    }
++    assert {identity.semantic_anchor.keys for identity in result.identity_audit} == {
++        ("bass-fish",),
++        ("bass-music",),
++    }
++
++
++def test_semantic_anchor_overlap_rejects_entire_word_pos_group():
++    result = discover_ambiguities(
++        [
++            entry("wug", "noun", "a", "first reading", "shared-sense"),
++            entry("wug", "noun", "b", "second reading", "shared-sense"),
++        ],
++        language="en",
++    )
++
++    assert result.index.profiles == ()
++    assert result.report.semantic_overlap_keys == 1
++    assert result.unresolved[0].reason == "semantic_anchor_overlap"
++    assert result.unresolved[0].details == {"overlapping_keys": ["shared-sense"]}
++
++
++def test_discovery_removes_universal_cues_from_every_runtime_profile():
++    result = discover_ambiguities(
++        [
++            entry("bass", "NOUN", "bæs", "a common freshwater fish", "bass-fish"),
++            entry("bass", "NOUN", "beɪs", "a common low musical range", "bass-music"),
++        ],
++        language="en",
++    )
++
++    assert len(result.index.profiles) == 2
++    assert all(
++        "common" not in {cue.token for cue in profile.cues} for profile in result.index.profiles
++    )
++
++
++def test_discovery_rejects_identical_or_empty_contrastive_cue_maps():
++    identical = discover_ambiguities(
++        [
++            entry("wug", "noun", "a", "common wording", "sense-a"),
++            entry("wug", "noun", "b", "common wording", "sense-b"),
++        ],
++        language="en",
++    )
++    insufficient = discover_ambiguities(
++        [
++            entry("wug", "noun", "a", "common fish", "sense-a"),
++            entry("wug", "noun", "b", "common", "sense-b"),
++        ],
++        language="en",
++    )
++
++    assert identical.index.profiles == ()
++    assert identical.unresolved[0].reason == "non_discriminative_rules"
++    assert identical.report.non_discriminative_keys == 1
++    assert insufficient.index.profiles == ()
++    assert insufficient.unresolved[0].reason == "insufficient_contrastive_evidence"
+diff --git a/tests/test_equivalence.py b/tests/test_equivalence.py
+index 78ba034..739af55 100644
+--- a/tests/test_equivalence.py
++++ b/tests/test_equivalence.py
+@@ -7,6 +7,7 @@ from pronresolve.equivalence import (
+     EquivalenceConfigurationError,
+     ExactEquivalence,
+     PhonodistEquivalence,
++    partition_pronunciations,
+ )
+
+
+@@ -79,3 +80,50 @@ def test_unsupported_profile_is_a_configuration_error():
+     pytest.importorskip("phonodist")
+     with pytest.raises(EquivalenceConfigurationError, match="no supported language profile"):
+         PhonodistEquivalence("xx-XX")
++
++
++def test_partition_merges_only_safe_equivalence_cliques():
++    class PairPolicy:
++        def __init__(self, pairs):
++            self.pairs = {frozenset(pair) for pair in pairs}
++
++        def equivalent(self, left, right):
++            return frozenset((left, right)) in self.pairs
++
++    result = partition_pronunciations(
++        ["c", "b", "a", "a"],
++        policy=PairPolicy({("a", "b")}),
++    )
++
++    assert tuple(item.pronunciations for item in result.classes) == (("a", "b"), ("c",))
++    assert len(result.pairwise_audit) == 3
++    assert not result.unsafe
++
++
++def test_partition_rejects_non_transitive_connected_component():
++    class ChainPolicy:
++        def equivalent(self, left, right):
++            return frozenset((left, right)) in {
++                frozenset(("a", "b")),
++                frozenset(("b", "c")),
++            }
++
++    result = partition_pronunciations(["c", "a", "b"], policy=ChainPolicy())
++
++    assert result.classes == ()
++    assert result.unsafe
++    assert result.reason == "non_transitive_equivalence_component"
++    assert len(result.pairwise_audit) == 3
++
++
++def test_partition_records_comparator_errors_and_fails_closed():
++    class BrokenPolicy:
++        def equivalent(self, left, right):
++            raise RuntimeError("not comparable")
++
++    result = partition_pronunciations(["a", "b", "c"], policy=BrokenPolicy())
++
++    assert result.classes == ()
++    assert result.unsafe
++    assert result.reason == "equivalence_error"
++    assert sum(pair.error is not None for pair in result.pairwise_audit) == 3
+diff --git a/tests/test_identity.py b/tests/test_identity.py
+new file mode 100644
+index 0000000..9e1ee4e
+--- /dev/null
++++ b/tests/test_identity.py
+@@ -0,0 +1,105 @@
++import pytest
++from typing import Any, cast
++
++from pronresolve.discovery import reading_id_v2
++from pronresolve.models import ReadingProfile, SemanticAnchor, SemanticIdentity, is_reading_id_v2
++
++
++def test_reading_id_v2_matches_golden_serialization_fixture() -> None:
++    anchor = SemanticAnchor(
++        namespace="lexhint:en:dictionary",
++        keys=("fixture:bass:fish",),
++    )
++
++    reading_id = reading_id_v2("en", "BASS", "noun", anchor)
++
++    assert reading_id == "r2-en-4ac47bae8fd561b340ad3cec"
++    assert is_reading_id_v2(reading_id)
++
++
++def test_semantic_anchor_normalizes_opaque_keys_without_casefolding() -> None:
++    anchor = SemanticAnchor(
++        namespace=" lexhint:en:e\u0301 ",
++        keys=(" sense:B ", "sense:A", "sense:A"),
++    )
++
++    assert anchor.namespace == "lexhint:en:é"
++    assert anchor.keys == ("sense:A", "sense:B")
++    assert SemanticAnchor("lexhint:en:é", ("Sense:A", "sense:B")) != anchor
++
++
++def test_reading_id_v2_uses_only_semantic_identity_fields() -> None:
++    anchor = SemanticAnchor("lexhint:en:dictionary", ("sense-fish", "sense-water"))
++    equivalent_anchor = SemanticAnchor(
++        "lexhint:en:dictionary", (" sense-water ", "sense-fish", "sense-fish")
++    )
++
++    expected = reading_id_v2("en-US", "Bass", "Noun", anchor)
++
++    assert reading_id_v2("en-US", "bass", "NOUN", equivalent_anchor) == expected
++    single_sense = SemanticAnchor(anchor.namespace, ("sense-fish",))
++    assert reading_id_v2("en-US", "bass", "NOUN", single_sense) != expected
++    assert reading_id_v2("en-US", "bass", "VERB", anchor) != expected
++    assert reading_id_v2("en-US", "bass-fish", "NOUN", anchor) != expected
++    assert expected.startswith("r2-en-us-")
++
++
++def test_semantic_anchor_rejects_missing_or_empty_identity() -> None:
++    with pytest.raises(ValueError, match="namespace values must be non-empty"):
++        SemanticAnchor("  ", ("sense-a",))
++    with pytest.raises(ValueError, match="at least one key"):
++        SemanticAnchor("lexhint:en:dictionary", ())
++    with pytest.raises(ValueError, match="key values must be non-empty"):
++        SemanticAnchor("lexhint:en:dictionary", (" ",))
++    with pytest.raises(ValueError, match="tuple of strings"):
++        SemanticAnchor("lexhint:en:dictionary", cast(Any, ["sense-a"]))  # type: ignore[arg-type]
++
++
++def test_semantic_identity_provenance_is_canonical_and_validated() -> None:
++    anchor = SemanticAnchor("lexhint:en:dictionary", ("sense-fish",))
++    identity = SemanticIdentity(
++        reading_id=reading_id_v2("en", "bass", "noun", anchor),
++        word="Bass",
++        pos="noun",
++        semantic_anchor=anchor,
++        sense_ids=(" sense-z ", "sense-a", "sense-z"),
++        source_ipas=("/bæs/", "beɪs"),
++        anchor_ipa="beɪs",
++    )
++
++    assert identity.word == "bass"
++    assert identity.pos == "NOUN"
++    assert identity.sense_ids == ("sense-a", "sense-z")
++    assert identity.source_ipas == ("beɪs", "bæs")
++    assert identity.to_dict()["semantic_anchor"] == {
++        "namespace": "lexhint:en:dictionary",
++        "keys": ["sense-fish"],
++    }
++    with pytest.raises(ValueError, match="first sorted source IPA"):
++        SemanticIdentity(
++            reading_id=identity.reading_id,
++            word="bass",
++            pos="NOUN",
++            semantic_anchor=anchor,
++            sense_ids=(),
++            source_ipas=("bæs", "beɪs"),
++            anchor_ipa="bæs",
++        )
++
++
++def test_r2_id_validation_rejects_malformed_values() -> None:
++    assert not is_reading_id_v2("r2-en-not-a-digest")
++    assert not is_reading_id_v2("r1-en-4ac47bae8fd561b340ad3cec")
++
++
++def test_reading_id_v2_rejects_non_string_identity_fields() -> None:
++    anchor = SemanticAnchor("lexhint:en:dictionary", ("sense-a",))
++    with pytest.raises(ValueError, match="language must be a non-empty string"):
++        reading_id_v2(None, "bass", "NOUN", anchor)  # type: ignore[arg-type]
++    with pytest.raises(ValueError, match="word must be a non-empty string"):
++        reading_id_v2("en", None, "NOUN", anchor)  # type: ignore[arg-type]
++
++
++def test_reading_profile_rejects_malformed_r2_id() -> None:
++    with pytest.raises(ValueError, match="well-formed r2 ID"):
++        ReadingProfile("bass", "NOUN", "r2-en-invalid", "bæs")
+diff --git a/tests/test_models.py b/tests/test_models.py
+index ceaeb6e..de5d205 100644
+--- a/tests/test_models.py
++++ b/tests/test_models.py
+@@ -53,7 +53,7 @@ def test_index_rejects_bad_root_and_schema_version():
+ def test_runtime_model_rejects_non_scalar_ipa_and_duplicate_cues():
+     value = valid_index()
+     value["entries"]["read"]["VERB"][0]["ipa"] = ["ɹiːd"]
+-    with pytest.raises(ValueError, match="ipa must be a non-empty string"):
++    with pytest.raises(ValueError, match=r"\.ipa must be a non-empty string"):
+         AmbiguityIndex.from_dict(value)
+
+
+diff --git a/tests/test_resolver.py b/tests/test_resolver.py
+index f445cab..e1b0b65 100644
+--- a/tests/test_resolver.py
++++ b/tests/test_resolver.py
+@@ -20,6 +20,7 @@ def make_resolver():
+         AmbiguityIndex(
+             language="en",
+             locale="en-US",
++            schema_version=2,
+             profiles=(
+                 profile("wʌg", {"aviary": 3.0}, "bird"),
+                 profile("wuːg", {"road": 3.0}, "bend"),
+@@ -66,6 +67,7 @@ def test_missing_pos_with_multiple_pos_groups_returns_none():
+     index = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(
+             profile("wʌg", {"aviary": 3.0}, "noun-a"),
+             profile("wuːg", {"road": 3.0}, "noun-b"),
+@@ -99,6 +101,7 @@ def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
+     tied = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(
+             profile("a", {"shared": 3.0}, "a"),
+             profile("b", {"shared": 3.0}, "b"),
+@@ -109,6 +112,7 @@ def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
+     single = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(profile("a", {"shared": 3.0}, "only"),),
+     )
+     assert Resolver(single).resolve("wug shared", start=0, end=3, pos="NOUN", lemma="wug") is None
+@@ -116,6 +120,7 @@ def test_tied_candidates_abstain_and_single_candidate_is_never_emitted():
+     three = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(
+             profile("a", {"aviary": 3.0}, "a"),
+             profile("b", {"road": 3.0}, "b"),
+@@ -148,6 +153,7 @@ def test_equal_scores_are_ordered_by_reading_id_and_report_matched_cues():
+     tied = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(
+             profile("a", {"shared": 3.0}, "z-reading"),
+             profile("b", {"shared": 3.0}, "a-reading"),
+@@ -166,6 +172,7 @@ def test_example_only_context_has_no_compiled_score():
+     index = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(
+             profile("a", {"aviary": 3.0}, "a"),
+             profile("b", {"road": 3.0}, "b"),
+diff --git a/tests/test_schema_v2.py b/tests/test_schema_v2.py
+index 099af95..095a75b 100644
+--- a/tests/test_schema_v2.py
++++ b/tests/test_schema_v2.py
+@@ -141,6 +141,7 @@ def test_encoder_rejects_an_emitted_group_with_fewer_than_two_candidates():
+     index = AmbiguityIndex(
+         language="en",
+         locale=None,
++        schema_version=2,
+         profiles=(ReadingProfile("read", "VERB", "r1", "ɹiːd"),),
+     )
+     with pytest.raises(ValueError, match="at least two candidates"):
+diff --git a/tests/test_schema_v3.py b/tests/test_schema_v3.py
+new file mode 100644
+index 0000000..6a9b5cc
+--- /dev/null
++++ b/tests/test_schema_v3.py
+@@ -0,0 +1,139 @@
++from __future__ import annotations
++
++import copy
++import json
++
++import pytest
++
++from pronresolve import (
++    AmbiguityIndex,
++    Cue,
++    ReadingProfile,
++    Resolver,
++    SemanticAnchor,
++    decode_v2,
++    decode_v3,
++    encode_v3,
++    reading_id_v2,
++    save_index,
++)
++from pronresolve.storage import load_index
++
++
++def sample_index() -> AmbiguityIndex:
++    fish_anchor = SemanticAnchor("fixture:en", ("bass-fish",))
++    music_anchor = SemanticAnchor("fixture:en", ("bass-music",))
++    return AmbiguityIndex(
++        language="en",
++        locale="en-US",
++        rules_id="en-us",
++        profiles=(
++            ReadingProfile(
++                word="bass",
++                pos="NOUN",
++                reading_id=reading_id_v2("en", "bass", "NOUN", fish_anchor),
++                anchor_ipa="bæs",
++                cues=(Cue("fish", 3.0),),
++            ),
++            ReadingProfile(
++                word="bass",
++                pos="NOUN",
++                reading_id=reading_id_v2("en", "bass", "NOUN", music_anchor),
++                anchor_ipa="beɪs",
++                cues=(Cue("music", 3.0),),
++            ),
++        ),
++    )
++
++
++def legacy_v2() -> dict[str, object]:
++    return {
++        "schema_version": 2,
++        "language": "en",
++        "locale": "en-US",
++        "entries": {
++            "bass": {
++                "NOUN": [
++                    {"id": "r1-fish", "ipa": "bæs", "sense_ids": [], "cues": {"3": ["fish"]}},
++                    {"id": "r1-music", "ipa": "beɪs", "sense_ids": [], "cues": {"3": ["music"]}},
++                ]
++            }
++        },
++    }
++
++
++def test_schema_v3_round_trip_uses_semantic_ids_and_anchor_ipa():
++    index = sample_index()
++    payload = encode_v3(index)
++
++    assert payload["schema_version"] == 3
++    assert payload["id_version"] == 2
++    assert payload["rules_id"] == "en-us"
++    candidates = payload["entries"]["bass"]["NOUN"]
++    assert all(set(candidate) == {"id", "anchor_ipa", "cues"} for candidate in candidates)
++    assert decode_v3(payload) == index
++
++
++def test_schema_v3_rejects_invalid_id_version_and_non_r2_ids():
++    payload = encode_v3(sample_index())
++    for id_version in (True, 1, 2.0, "2", None):
++        malformed = copy.deepcopy(payload)
++        malformed["id_version"] = id_version
++        with pytest.raises(ValueError, match="id_version must be 2"):
++            decode_v3(malformed)
++
++    malformed = copy.deepcopy(payload)
++    malformed["entries"]["bass"]["NOUN"][0]["id"] = "r1-old-reading"
++    with pytest.raises(ValueError, match="well-formed r2 reading ID"):
++        decode_v3(malformed)
++
++
++def test_schema_v3_rejects_duplicate_reading_ids():
++    payload = encode_v3(sample_index())
++    payload["entries"]["bass"]["NOUN"][1]["id"] = payload["entries"]["bass"]["NOUN"][0]["id"]
++
++    with pytest.raises(ValueError, match="duplicates reading ID"):
++        decode_v3(payload)
++
++
++def test_schema_v2_load_save_preserves_legacy_ids_and_schema(tmp_path):
++    source = tmp_path / "legacy-v2.json"
++    source.write_text(json.dumps(legacy_v2()), encoding="utf-8")
++    loaded = load_index(source)
++
++    assert loaded.schema_version == 2
++    assert {profile.reading_id for profile in loaded.profiles} == {"r1-fish", "r1-music"}
++    output = save_index(loaded, tmp_path / "saved-v2.json")
++    saved = json.loads(output.read_text(encoding="utf-8"))
++    assert saved["schema_version"] == 2
++    assert {candidate["id"] for candidate in saved["entries"]["bass"]["NOUN"]} == {
++        "r1-fish",
++        "r1-music",
++    }
++    with pytest.raises(ValueError, match="well-formed r2"):
++        save_index(loaded, tmp_path / "not-upgraded.json", schema_version=3)
++    assert decode_v2(saved) == loaded
++
++
++def test_v3_resolver_returns_r2_selector_and_diagnostic_aliases():
++    index = sample_index()
++    text = "bass fish swims"
++    result = Resolver(index, min_score=0, min_margin=0).resolve(
++        text,
++        start=0,
++        end=4,
++        pos="NOUN",
++        lemma="bass",
++    )
++
++    assert result is not None
++    assert result.reading_id.startswith("r2-en-")
++    assert result.selector == f"READING:{result.reading_id}"
++    assert result.anchor_ipa == "bæs"
++    assert result.ipa == result.anchor_ipa
++
++
++def test_reading_profile_keeps_ipa_as_compatibility_alias():
++    profile = ReadingProfile("bass", "NOUN", "r1-legacy", ipa="bæs")
++    assert profile.anchor_ipa == "bæs"
++    assert profile.ipa == profile.anchor_ipa
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+index 0eacb47..cc2f46f 100644
+--- a/tests/test_storage.py
++++ b/tests/test_storage.py
+@@ -27,6 +27,7 @@ def test_index_round_trip_saves_compact_v2_and_resolver_path_loads_it(tmp_path):
+     index = AmbiguityIndex(
+         language="en",
+         locale="en-US",
++        schema_version=2,
+         profiles=(
+             ReadingProfile(
+                 word="wug",
